@@ -16,7 +16,6 @@ import {
 import {
   delay,
   detectDeviceType,
-  detectPlatform,
   generateUUID,
   getDeviceModel,
   getISOTimestamp,
@@ -218,6 +217,7 @@ export class MostlyGoodMetrics {
     const mergedProperties: EventProperties = {
       [SystemProperties.DEVICE_TYPE]: detectDeviceType(),
       [SystemProperties.DEVICE_MODEL]: getDeviceModel(),
+      [SystemProperties.SDK]: this.config.sdk,
       ...sanitizedProperties,
     };
 
@@ -226,7 +226,7 @@ export class MostlyGoodMetrics {
       timestamp: getISOTimestamp(),
       userId: this.userId ?? undefined,
       sessionId: this.sessionIdValue,
-      platform: detectPlatform(),
+      platform: this.config.platform,
       appVersion: this.config.appVersion || undefined,
       osVersion: this.config.osVersion || getOSVersion() || undefined,
       environment: this.config.environment,
@@ -374,7 +374,7 @@ export class MostlyGoodMetrics {
 
   private buildPayload(events: MGMEvent[]): MGMEventsPayload {
     const context: MGMEventContext = {
-      platform: detectPlatform(),
+      platform: this.config.platform,
       appVersion: this.config.appVersion || undefined,
       osVersion: this.config.osVersion || getOSVersion() || undefined,
       userId: this.userId ?? undefined,

@@ -74,6 +74,18 @@ export interface MGMConfiguration {
   osVersion?: string;
 
   /**
+   * Override the auto-detected platform.
+   * Use this when wrapping the SDK (e.g., React Native should pass 'ios' or 'android').
+   */
+  platform?: Platform;
+
+  /**
+   * The SDK identifier. Auto-set to 'javascript' but can be overridden by wrapper SDKs.
+   * @default "javascript"
+   */
+  sdk?: SDK;
+
+  /**
    * Custom storage adapter. If not provided, uses localStorage in browsers
    * or in-memory storage in non-browser environments.
    */
@@ -185,9 +197,14 @@ export interface MGMEventsPayload {
 }
 
 /**
- * Supported platforms.
+ * Supported platforms (the actual OS/runtime).
  */
-export type Platform = 'web' | 'ios' | 'android' | 'react-native' | 'expo' | 'node';
+export type Platform = 'web' | 'ios' | 'android' | 'node';
+
+/**
+ * SDK identifiers.
+ */
+export type SDK = 'javascript' | 'react-native' | 'swift' | 'android';
 
 /**
  * Device types for automatic device detection.
@@ -310,6 +327,7 @@ export const SystemProperties = {
   DEVICE_MODEL: '$device_model',
   VERSION: '$version',
   PREVIOUS_VERSION: '$previous_version',
+  SDK: '$sdk',
 } as const;
 
 /**

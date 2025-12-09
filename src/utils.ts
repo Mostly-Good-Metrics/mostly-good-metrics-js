@@ -178,6 +178,8 @@ export function resolveConfiguration(config: MGMConfiguration): ResolvedConfigur
     bundleId: config.bundleId ?? detectBundleId(),
     appVersion: config.appVersion ?? '',
     osVersion: config.osVersion ?? '',
+    platform: config.platform ?? detectPlatform(),
+    sdk: config.sdk ?? 'javascript',
     storage: config.storage,
     networkClient: config.networkClient,
   };
@@ -198,14 +200,9 @@ function detectBundleId(): string {
 
 /**
  * Detect the current platform.
+ * Note: For React Native, the platform should be passed via config (ios/android).
  */
 export function detectPlatform(): Platform {
-  // Check for React Native / Expo
-  if (typeof navigator !== 'undefined' && navigator.product === 'ReactNative') {
-    // Could check for Expo-specific globals here
-    return 'react-native';
-  }
-
   // Check for Node.js
   if (typeof process !== 'undefined' && process.versions?.node) {
     return 'node';

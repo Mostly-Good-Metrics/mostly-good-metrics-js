@@ -37,6 +37,7 @@ export type {
   MGMEventContext,
   MGMEventsPayload,
   Platform,
+  SDK,
   DeviceType,
   MGMErrorType,
   SendResult,

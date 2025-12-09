@@ -144,6 +144,70 @@ describe('MostlyGoodMetrics', () => {
       expect(events[0].environment).toBe('production');
       expect(events[0].platform).toBeDefined();
     });
+
+    it('should include $sdk property defaulting to javascript', async () => {
+      MostlyGoodMetrics.track('test_event');
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const events = await storage.fetchEvents(1);
+      expect(events[0].properties?.$sdk).toBe('javascript');
+    });
+  });
+
+  describe('platform and sdk configuration', () => {
+    it('should use configured platform', async () => {
+      MostlyGoodMetrics.reset();
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+        platform: 'ios',
+      });
+
+      MostlyGoodMetrics.track('test_event');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const events = await storage.fetchEvents(1);
+      expect(events[0].platform).toBe('ios');
+    });
+
+    it('should use configured sdk', async () => {
+      MostlyGoodMetrics.reset();
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+        sdk: 'react-native',
+      });
+
+      MostlyGoodMetrics.track('test_event');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const events = await storage.fetchEvents(1);
+      expect(events[0].properties?.$sdk).toBe('react-native');
+    });
+
+    it('should allow both platform and sdk to be configured together', async () => {
+      MostlyGoodMetrics.reset();
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+        platform: 'android',
+        sdk: 'react-native',
+      });
+
+      MostlyGoodMetrics.track('test_event');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const events = await storage.fetchEvents(1);
+      expect(events[0].platform).toBe('android');
+      expect(events[0].properties?.$sdk).toBe('react-native');
+    });
   });
 
   describe('identify', () => {
