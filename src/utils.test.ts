@@ -5,6 +5,8 @@ import {
   validateEventName,
   sanitizeProperties,
   resolveConfiguration,
+  getLocale,
+  getTimezone,
 } from './utils';
 import { Constraints, DefaultConfiguration, MGMError } from './types';
 
@@ -235,5 +237,34 @@ describe('resolveConfiguration', () => {
   it('should enforce maxStoredEvents minimum', () => {
     const config = resolveConfiguration({ apiKey: 'test', maxStoredEvents: 10 });
     expect(config.maxStoredEvents).toBe(Constraints.MIN_STORED_EVENTS);
+  });
+});
+
+describe('getLocale', () => {
+  it('should return a non-empty string', () => {
+    const locale = getLocale();
+    expect(typeof locale).toBe('string');
+    expect(locale.length).toBeGreaterThan(0);
+  });
+
+  it('should return a locale-like string (e.g., en, en-US)', () => {
+    const locale = getLocale();
+    // Locale should be something like "en", "en-US", "fr-FR", etc.
+    expect(locale).toMatch(/^[a-z]{2}(-[A-Z]{2})?$/i);
+  });
+});
+
+describe('getTimezone', () => {
+  it('should return a string', () => {
+    const timezone = getTimezone();
+    expect(typeof timezone).toBe('string');
+  });
+
+  it('should return a valid IANA timezone or empty string', () => {
+    const timezone = getTimezone();
+    // Should be empty or a valid IANA timezone like "America/New_York"
+    if (timezone) {
+      expect(timezone).toMatch(/^[A-Za-z_]+\/[A-Za-z_]+$/);
+    }
   });
 });

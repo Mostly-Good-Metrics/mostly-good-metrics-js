@@ -160,6 +160,11 @@ export interface MGMEvent {
   appVersion?: string;
 
   /**
+   * The app build number (separate from version).
+   */
+  appBuildNumber?: string;
+
+  /**
    * The OS version string.
    */
   osVersion?: string;
@@ -168,6 +173,21 @@ export interface MGMEvent {
    * The environment name.
    */
   environment: string;
+
+  /**
+   * The device manufacturer (e.g., "Apple", "Samsung").
+   */
+  deviceManufacturer?: string;
+
+  /**
+   * The user's locale (e.g., "en-US").
+   */
+  locale?: string;
+
+  /**
+   * The user's timezone (e.g., "America/New_York").
+   */
+  timezone?: string;
 
   /**
    * Custom properties attached to this event.
@@ -182,10 +202,14 @@ export interface MGMEvent {
 export interface MGMEventContext {
   platform: Platform;
   appVersion?: string;
+  appBuildNumber?: string;
   osVersion?: string;
   userId?: string;
   sessionId?: string;
   environment: string;
+  deviceManufacturer?: string;
+  locale?: string;
+  timezone?: string;
 }
 
 /**

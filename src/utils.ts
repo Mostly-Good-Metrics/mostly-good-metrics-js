@@ -310,3 +310,24 @@ export function getDeviceModel(): string {
 export function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+/**
+ * Get the user's locale.
+ */
+export function getLocale(): string {
+  if (typeof navigator !== 'undefined') {
+    return navigator.language || 'en';
+  }
+  return 'en';
+}
+
+/**
+ * Get the user's timezone.
+ */
+export function getTimezone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+  } catch {
+    return '';
+  }
+}
