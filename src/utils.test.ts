@@ -262,9 +262,9 @@ describe('getTimezone', () => {
 
   it('should return a valid IANA timezone or empty string', () => {
     const timezone = getTimezone();
-    // Should be empty or a valid IANA timezone like "America/New_York"
+    // Should be empty or a valid IANA timezone like "America/New_York" or "UTC"
     if (timezone) {
-      expect(timezone).toMatch(/^[A-Za-z_]+\/[A-Za-z_]+$/);
+      expect(timezone).toMatch(/^([A-Za-z_]+\/[A-Za-z_]+|UTC)$/);
     }
   });
 });
