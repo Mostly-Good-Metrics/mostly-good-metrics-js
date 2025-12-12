@@ -19,7 +19,9 @@ import {
   generateUUID,
   getDeviceModel,
   getISOTimestamp,
+  getLocale,
   getOSVersion,
+  getTimezone,
   resolveConfiguration,
   sanitizeProperties,
   validateEventName,
@@ -230,6 +232,8 @@ export class MostlyGoodMetrics {
       appVersion: this.config.appVersion || undefined,
       osVersion: this.config.osVersion || getOSVersion() || undefined,
       environment: this.config.environment,
+      locale: getLocale(),
+      timezone: getTimezone(),
       properties: Object.keys(mergedProperties).length > 0 ? mergedProperties : undefined,
     };
 
@@ -380,6 +384,8 @@ export class MostlyGoodMetrics {
       userId: this.userId ?? undefined,
       sessionId: this.sessionIdValue,
       environment: this.config.environment,
+      locale: getLocale(),
+      timezone: getTimezone(),
     };
 
     return { events, context };
