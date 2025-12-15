@@ -1,9 +1,10 @@
 import { logger } from './logger';
-import { Constraints, IEventStorage, MGMError, MGMEvent } from './types';
+import { Constraints, EventProperties, IEventStorage, MGMError, MGMEvent } from './types';
 
 const STORAGE_KEY = 'mostlygoodmetrics_events';
 const USER_ID_KEY = 'mostlygoodmetrics_user_id';
 const APP_VERSION_KEY = 'mostlygoodmetrics_app_version';
+const SUPER_PROPERTIES_KEY = 'mostlygoodmetrics_super_properties';
 
 /**
  * Check if we're running in a browser environment with localStorage available.
@@ -177,6 +178,7 @@ export function createDefaultStorage(maxEvents: number): IEventStorage {
 class PersistenceManager {
   private inMemoryUserId: string | null = null;
   private inMemoryAppVersion: string | null = null;
+  private inMemorySuperProperties: EventProperties = {};
 
   /**
    * Get the persisted user ID.
@@ -243,6 +245,69 @@ class PersistenceManager {
       return true;
     }
     return false;
+  }
+
+  /**
+   * Get all super properties.
+   */
+  getSuperProperties(): EventProperties {
+    if (isLocalStorageAvailable()) {
+      try {
+        const stored = localStorage.getItem(SUPER_PROPERTIES_KEY);
+        if (stored) {
+          return JSON.parse(stored) as EventProperties;
+        }
+      } catch (e) {
+        logger.warn('Failed to load super properties from localStorage', e);
+      }
+      return {};
+    }
+    return { ...this.inMemorySuperProperties };
+  }
+
+  /**
+   * Set a single super property.
+   */
+  setSuperProperty(key: string, value: EventProperties[string]): void {
+    const properties = this.getSuperProperties();
+    properties[key] = value;
+    this.saveSuperProperties(properties);
+  }
+
+  /**
+   * Set multiple super properties at once.
+   */
+  setSuperProperties(properties: EventProperties): void {
+    const current = this.getSuperProperties();
+    const merged = { ...current, ...properties };
+    this.saveSuperProperties(merged);
+  }
+
+  /**
+   * Remove a single super property.
+   */
+  removeSuperProperty(key: string): void {
+    const properties = this.getSuperProperties();
+    delete properties[key];
+    this.saveSuperProperties(properties);
+  }
+
+  /**
+   * Clear all super properties.
+   */
+  clearSuperProperties(): void {
+    this.saveSuperProperties({});
+  }
+
+  private saveSuperProperties(properties: EventProperties): void {
+    this.inMemorySuperProperties = properties;
+    if (isLocalStorageAvailable()) {
+      try {
+        localStorage.setItem(SUPER_PROPERTIES_KEY, JSON.stringify(properties));
+      } catch (e) {
+        logger.warn('Failed to save super properties to localStorage', e);
+      }
+    }
   }
 }
 
