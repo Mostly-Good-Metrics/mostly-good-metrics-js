@@ -1,4 +1,4 @@
-import { InMemoryEventStorage, LocalStorageEventStorage } from './storage';
+import { InMemoryEventStorage, LocalStorageEventStorage, persistence } from './storage';
 import { MGMEvent } from './types';
 
 const createMockEvent = (name: string): MGMEvent => ({
@@ -171,5 +171,154 @@ describe('LocalStorageEventStorage', () => {
     // Should not throw and should return empty array
     const events = await storage.fetchEvents(10);
     expect(events).toHaveLength(0);
+  });
+});
+
+describe('PersistenceManager super properties', () => {
+  beforeEach(() => {
+    // Mock localStorage
+    const localStorageMock = (() => {
+      let store: Record<string, string> = {};
+      return {
+        getItem: jest.fn((key: string) => store[key] ?? null),
+        setItem: jest.fn((key: string, value: string) => {
+          store[key] = value;
+        }),
+        removeItem: jest.fn((key: string) => {
+          delete store[key];
+        }),
+        clear: jest.fn(() => {
+          store = {};
+        }),
+      };
+    })();
+
+    Object.defineProperty(window, 'localStorage', {
+      value: localStorageMock,
+      writable: true,
+    });
+
+    // Clear any existing super properties
+    persistence.clearSuperProperties();
+  });
+
+  afterEach(() => {
+    jest.clearAllMocks();
+    persistence.clearSuperProperties();
+  });
+
+  it('should return empty object when no super properties are set', () => {
+    const props = persistence.getSuperProperties();
+    expect(props).toEqual({});
+  });
+
+  it('should set and get a single super property', () => {
+    persistence.setSuperProperty('tier', 'premium');
+
+    const props = persistence.getSuperProperties();
+    expect(props.tier).toBe('premium');
+  });
+
+  it('should set and get multiple super properties', () => {
+    persistence.setSuperProperties({
+      tier: 'enterprise',
+      region: 'us-west',
+      beta_user: true,
+    });
+
+    const props = persistence.getSuperProperties();
+    expect(props.tier).toBe('enterprise');
+    expect(props.region).toBe('us-west');
+    expect(props.beta_user).toBe(true);
+  });
+
+  it('should merge properties when setting multiple times', () => {
+    persistence.setSuperProperty('first', 'value1');
+    persistence.setSuperProperties({
+      second: 'value2',
+      third: 'value3',
+    });
+
+    const props = persistence.getSuperProperties();
+    expect(props.first).toBe('value1');
+    expect(props.second).toBe('value2');
+    expect(props.third).toBe('value3');
+  });
+
+  it('should override existing property with same key', () => {
+    persistence.setSuperProperty('key', 'original');
+    persistence.setSuperProperty('key', 'updated');
+
+    const props = persistence.getSuperProperties();
+    expect(props.key).toBe('updated');
+  });
+
+  it('should remove a single super property', () => {
+    persistence.setSuperProperties({
+      keep: 'this',
+      remove: 'this',
+    });
+
+    persistence.removeSuperProperty('remove');
+
+    const props = persistence.getSuperProperties();
+    expect(props.keep).toBe('this');
+    expect(props.remove).toBeUndefined();
+  });
+
+  it('should handle removing non-existent property gracefully', () => {
+    persistence.setSuperProperty('exists', 'value');
+
+    expect(() => persistence.removeSuperProperty('nonexistent')).not.toThrow();
+
+    const props = persistence.getSuperProperties();
+    expect(props.exists).toBe('value');
+  });
+
+  it('should clear all super properties', () => {
+    persistence.setSuperProperties({
+      prop1: 'value1',
+      prop2: 'value2',
+      prop3: 'value3',
+    });
+
+    persistence.clearSuperProperties();
+
+    const props = persistence.getSuperProperties();
+    expect(Object.keys(props)).toHaveLength(0);
+  });
+
+  it('should persist super properties to localStorage', () => {
+    persistence.setSuperProperties({
+      persistent: 'value',
+    });
+
+    expect(localStorage.setItem).toHaveBeenCalledWith(
+      'mostlygoodmetrics_super_properties',
+      JSON.stringify({ persistent: 'value' })
+    );
+  });
+
+  it('should handle various value types', () => {
+    persistence.setSuperProperties({
+      string_val: 'text',
+      number_val: 42,
+      boolean_val: true,
+      null_val: null,
+    });
+
+    const props = persistence.getSuperProperties();
+    expect(props.string_val).toBe('text');
+    expect(props.number_val).toBe(42);
+    expect(props.boolean_val).toBe(true);
+    expect(props.null_val).toBe(null);
+  });
+
+  it('should handle localStorage getItem returning corrupted JSON', () => {
+    (localStorage.getItem as jest.Mock).mockReturnValueOnce('not valid json {');
+
+    // Should not throw and should return empty object
+    const props = persistence.getSuperProperties();
+    expect(props).toEqual({});
   });
 });

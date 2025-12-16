@@ -166,6 +166,41 @@ export class MostlyGoodMetrics {
     return MostlyGoodMetrics.instance?.getPendingEventCount() ?? Promise.resolve(0);
   }
 
+  /**
+   * Set a single super property that will be included with every event.
+   */
+  static setSuperProperty(key: string, value: EventProperties[string]): void {
+    MostlyGoodMetrics.instance?.setSuperProperty(key, value);
+  }
+
+  /**
+   * Set multiple super properties at once.
+   */
+  static setSuperProperties(properties: EventProperties): void {
+    MostlyGoodMetrics.instance?.setSuperProperties(properties);
+  }
+
+  /**
+   * Remove a single super property.
+   */
+  static removeSuperProperty(key: string): void {
+    MostlyGoodMetrics.instance?.removeSuperProperty(key);
+  }
+
+  /**
+   * Clear all super properties.
+   */
+  static clearSuperProperties(): void {
+    MostlyGoodMetrics.instance?.clearSuperProperties();
+  }
+
+  /**
+   * Get all current super properties.
+   */
+  static getSuperProperties(): EventProperties {
+    return MostlyGoodMetrics.instance?.getSuperProperties() ?? {};
+  }
+
   // ============================================================
   // Instance properties
   // ============================================================
@@ -214,13 +249,16 @@ export class MostlyGoodMetrics {
     }
 
     const sanitizedProperties = sanitizeProperties(properties);
+    const superProperties = persistence.getSuperProperties();
 
-    // Add system properties
+    // Merge properties: super properties < event properties < system properties
+    // Event properties override super properties, system properties are always added
     const mergedProperties: EventProperties = {
+      ...superProperties,
+      ...sanitizedProperties,
       [SystemProperties.DEVICE_TYPE]: detectDeviceType(),
       [SystemProperties.DEVICE_MODEL]: getDeviceModel(),
       [SystemProperties.SDK]: this.config.sdk,
-      ...sanitizedProperties,
     };
 
     const event: MGMEvent = {
@@ -309,6 +347,45 @@ export class MostlyGoodMetrics {
    */
   async getPendingEventCount(): Promise<number> {
     return this.storage.eventCount();
+  }
+
+  /**
+   * Set a single super property that will be included with every event.
+   */
+  setSuperProperty(key: string, value: EventProperties[string]): void {
+    logger.debug(`Setting super property: ${key}`);
+    persistence.setSuperProperty(key, value);
+  }
+
+  /**
+   * Set multiple super properties at once.
+   */
+  setSuperProperties(properties: EventProperties): void {
+    logger.debug(`Setting super properties: ${Object.keys(properties).join(', ')}`);
+    persistence.setSuperProperties(properties);
+  }
+
+  /**
+   * Remove a single super property.
+   */
+  removeSuperProperty(key: string): void {
+    logger.debug(`Removing super property: ${key}`);
+    persistence.removeSuperProperty(key);
+  }
+
+  /**
+   * Clear all super properties.
+   */
+  clearSuperProperties(): void {
+    logger.debug('Clearing all super properties');
+    persistence.clearSuperProperties();
+  }
+
+  /**
+   * Get all current super properties.
+   */
+  getSuperProperties(): EventProperties {
+    return persistence.getSuperProperties();
   }
 
   /**
