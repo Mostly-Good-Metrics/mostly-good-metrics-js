@@ -32,3 +32,27 @@ jobs:
 
       - name: Publish to npm
         run: npm publish --access public
+
+      - name: Discord notification (success)
+        if: success()
+        run: |
+          curl -H "Content-Type: application/json" -X POST -d '{
+            "embeds": [{
+              "title": "✅ JavaScript SDK published to npm",
+              "description": "Version `${{ github.ref_name }}` published successfully",
+              "color": 5025616,
+              "url": "https://www.npmjs.com/package/@mostly-good-metrics/javascript"
+            }]
+          }' ${{ secrets.DISCORD_WEBHOOK_URL }}
+
+      - name: Discord notification (failure)
+        if: failure()
+        run: |
+          curl -H "Content-Type: application/json" -X POST -d '{
+            "embeds": [{
+              "title": "❌ JavaScript SDK publish failed",
+              "description": "Version `${{ github.ref_name }}` failed to publish to npm",
+              "color": 15158332,
+              "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            }]
+          }' ${{ secrets.DISCORD_WEBHOOK_URL }}

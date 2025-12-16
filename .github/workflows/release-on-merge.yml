@@ -33,3 +33,15 @@ jobs:
           generate_release_notes: false
         env:
           GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+
+      - name: Discord notification (failure)
+        if: failure()
+        run: |
+          curl -H "Content-Type: application/json" -X POST -d '{
+            "embeds": [{
+              "title": "❌ JavaScript SDK release failed",
+              "description": "Failed to create GitHub release for version `${{ steps.version.outputs.version }}`",
+              "color": 15158332,
+              "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            }]
+          }' ${{ secrets.DISCORD_WEBHOOK_URL }}
