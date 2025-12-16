@@ -406,5 +406,122 @@ describe('MostlyGoodMetrics', () => {
       await expect(MostlyGoodMetrics.clearPendingEvents()).resolves.not.toThrow();
       await expect(MostlyGoodMetrics.getPendingEventCount()).resolves.toBe(0);
     });
+
+    it('should not throw for super property methods when not configured', () => {
+      expect(() => MostlyGoodMetrics.setSuperProperty('key', 'value')).not.toThrow();
+      expect(() => MostlyGoodMetrics.setSuperProperties({ key: 'value' })).not.toThrow();
+      expect(() => MostlyGoodMetrics.removeSuperProperty('key')).not.toThrow();
+      expect(() => MostlyGoodMetrics.clearSuperProperties()).not.toThrow();
+      expect(MostlyGoodMetrics.getSuperProperties()).toEqual({});
+    });
+  });
+
+  describe('super properties', () => {
+    beforeEach(() => {
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+      });
+    });
+
+    afterEach(() => {
+      MostlyGoodMetrics.clearSuperProperties();
+    });
+
+    it('should set a single super property', () => {
+      MostlyGoodMetrics.setSuperProperty('plan', 'premium');
+
+      const props = MostlyGoodMetrics.getSuperProperties();
+      expect(props.plan).toBe('premium');
+    });
+
+    it('should set multiple super properties at once', () => {
+      MostlyGoodMetrics.setSuperProperties({
+        plan: 'enterprise',
+        role: 'admin',
+      });
+
+      const props = MostlyGoodMetrics.getSuperProperties();
+      expect(props.plan).toBe('enterprise');
+      expect(props.role).toBe('admin');
+    });
+
+    it('should merge with existing super properties', () => {
+      MostlyGoodMetrics.setSuperProperty('existing', 'value');
+      MostlyGoodMetrics.setSuperProperties({
+        new_prop: 'new_value',
+      });
+
+      const props = MostlyGoodMetrics.getSuperProperties();
+      expect(props.existing).toBe('value');
+      expect(props.new_prop).toBe('new_value');
+    });
+
+    it('should remove a single super property', () => {
+      MostlyGoodMetrics.setSuperProperties({
+        keep: 'this',
+        remove: 'this',
+      });
+
+      MostlyGoodMetrics.removeSuperProperty('remove');
+
+      const props = MostlyGoodMetrics.getSuperProperties();
+      expect(props.keep).toBe('this');
+      expect(props.remove).toBeUndefined();
+    });
+
+    it('should clear all super properties', () => {
+      MostlyGoodMetrics.setSuperProperties({
+        prop1: 'value1',
+        prop2: 'value2',
+      });
+
+      MostlyGoodMetrics.clearSuperProperties();
+
+      const props = MostlyGoodMetrics.getSuperProperties();
+      expect(Object.keys(props)).toHaveLength(0);
+    });
+
+    it('should include super properties in tracked events', async () => {
+      MostlyGoodMetrics.setSuperProperties({
+        user_tier: 'gold',
+        source: 'mobile',
+      });
+
+      MostlyGoodMetrics.track('purchase');
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const events = await storage.fetchEvents(1);
+      expect(events[0].properties?.user_tier).toBe('gold');
+      expect(events[0].properties?.source).toBe('mobile');
+    });
+
+    it('should allow event properties to override super properties', async () => {
+      MostlyGoodMetrics.setSuperProperty('source', 'default');
+
+      MostlyGoodMetrics.track('click', {
+        source: 'override',
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const events = await storage.fetchEvents(1);
+      expect(events[0].properties?.source).toBe('override');
+    });
+
+    it('should not allow super properties to override system properties', async () => {
+      MostlyGoodMetrics.setSuperProperty('$device_type', 'hacked');
+
+      MostlyGoodMetrics.track('test_event');
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const events = await storage.fetchEvents(1);
+      // System properties should take precedence
+      expect(events[0].properties?.$device_type).not.toBe('hacked');
+    });
   });
 });
