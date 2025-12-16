@@ -135,6 +135,11 @@ export interface MGMEvent {
   name: string;
 
   /**
+   * Unique client-generated ID for deduplication.
+   */
+  client_event_id: string;
+
+  /**
    * ISO8601 timestamp when the event occurred.
    */
   timestamp: string;

@@ -145,6 +145,32 @@ describe('MostlyGoodMetrics', () => {
       expect(events[0].platform).toBeDefined();
     });
 
+    it('should include client_event_id as a UUID', async () => {
+      MostlyGoodMetrics.track('test_event');
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const events = await storage.fetchEvents(1);
+      expect(events[0].client_event_id).toBeDefined();
+      // UUID v4 format: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
+      expect(events[0].client_event_id).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+      );
+    });
+
+    it('should generate unique client_event_id for each event', async () => {
+      MostlyGoodMetrics.track('event1');
+      MostlyGoodMetrics.track('event2');
+      MostlyGoodMetrics.track('event3');
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const events = await storage.fetchEvents(3);
+      const ids = events.map((e) => e.client_event_id);
+      const uniqueIds = new Set(ids);
+      expect(uniqueIds.size).toBe(3);
+    });
+
     it('should include $sdk property defaulting to javascript', async () => {
       MostlyGoodMetrics.track('test_event');
 
