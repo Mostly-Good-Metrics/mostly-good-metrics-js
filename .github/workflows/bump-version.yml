@@ -93,6 +93,14 @@ jobs:
             sed -i "s/version = \".*\"/version = \"$NEW\"/" "$FILE"
           fi
 
+      - name: Update SDK version constant in code
+        run: |
+          NEW="${{ steps.version.outputs.new }}"
+          # JavaScript SDK - update SDK_VERSION in network.ts
+          if [ -f "src/network.ts" ]; then
+            sed -i "s/const SDK_VERSION = '.*';/const SDK_VERSION = '$NEW';/" src/network.ts
+          fi
+
       - name: Create Pull Request
         id: create-pr
         uses: peter-evans/create-pull-request@v6
