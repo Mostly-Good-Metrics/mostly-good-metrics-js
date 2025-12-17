@@ -7,9 +7,11 @@ import {
   ResolvedConfiguration,
   SendResult,
 } from './types';
+import { getOSVersion } from './utils';
 
 const EVENTS_ENDPOINT = '/v1/events';
 const REQUEST_TIMEOUT_MS = 60000; // 60 seconds
+const SDK_VERSION = '0.4.0';
 
 /**
  * Compress data using gzip if available (browser CompressionStream API).
@@ -72,9 +74,14 @@ export class FetchNetworkClient implements INetworkClient {
     const jsonBody = JSON.stringify(payload);
     const { data, compressed } = await compressIfNeeded(jsonBody);
 
+    const osVersion = config.osVersion || getOSVersion();
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'X-MGM-Key': config.apiKey,
+      'X-MGM-SDK': config.sdk,
+      'X-MGM-SDK-Version': SDK_VERSION,
+      'X-MGM-Platform': config.platform,
+      ...(osVersion && { 'X-MGM-Platform-Version': osVersion }),
     };
 
     if (config.bundleId) {

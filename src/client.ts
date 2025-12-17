@@ -263,6 +263,7 @@ export class MostlyGoodMetrics {
 
     const event: MGMEvent = {
       name,
+      client_event_id: generateUUID(),
       timestamp: getISOTimestamp(),
       userId: this.userId ?? undefined,
       sessionId: this.sessionIdValue,
