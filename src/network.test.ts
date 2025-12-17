@@ -64,12 +64,19 @@ describe('FetchNetworkClient', () => {
       expect(capturedHeaders['X-MGM-SDK']).toBe('react-native');
     });
 
-    it('should include X-MGM-SDK-Version header', async () => {
+    it('should include X-MGM-SDK-Version header with default version', async () => {
       const config = createMockConfig();
       await networkClient.sendEvents(createMockPayload(), config);
 
       expect(capturedHeaders['X-MGM-SDK-Version']).toBeDefined();
       expect(capturedHeaders['X-MGM-SDK-Version']).toMatch(/^\d+\.\d+\.\d+$/);
+    });
+
+    it('should use custom sdkVersion when provided', async () => {
+      const config = createMockConfig({ sdkVersion: '2.0.0' });
+      await networkClient.sendEvents(createMockPayload(), config);
+
+      expect(capturedHeaders['X-MGM-SDK-Version']).toBe('2.0.0');
     });
 
     it('should include X-MGM-Platform header from config', async () => {

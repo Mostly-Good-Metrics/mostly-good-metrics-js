@@ -180,6 +180,7 @@ export function resolveConfiguration(config: MGMConfiguration): ResolvedConfigur
     osVersion: config.osVersion ?? '',
     platform: config.platform ?? detectPlatform(),
     sdk: config.sdk ?? 'javascript',
+    sdkVersion: config.sdkVersion ?? '',
     storage: config.storage,
     networkClient: config.networkClient,
   };
