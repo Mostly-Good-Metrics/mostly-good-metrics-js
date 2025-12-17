@@ -75,11 +75,12 @@ export class FetchNetworkClient implements INetworkClient {
     const { data, compressed } = await compressIfNeeded(jsonBody);
 
     const osVersion = config.osVersion || getOSVersion();
+    const sdkVersion = config.sdkVersion || SDK_VERSION;
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'X-MGM-Key': config.apiKey,
       'X-MGM-SDK': config.sdk,
-      'X-MGM-SDK-Version': SDK_VERSION,
+      'X-MGM-SDK-Version': sdkVersion,
       'X-MGM-Platform': config.platform,
       ...(osVersion && { 'X-MGM-Platform-Version': osVersion }),
     };
