@@ -1,6 +1,6 @@
 {
   "name": "@mostly-good-metrics/javascript",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "JavaScript/TypeScript SDK for MostlyGoodMetrics - a lightweight analytics library for web applications",
   "main": "dist/cjs/index.js",
   "module": "dist/esm/index.js",
