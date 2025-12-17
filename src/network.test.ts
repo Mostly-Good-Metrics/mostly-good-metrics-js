@@ -10,7 +10,9 @@ describe('FetchNetworkClient', () => {
   let mockFetch: jest.Mock;
   let capturedHeaders: Record<string, string>;
 
-  const createMockConfig = (overrides: Partial<ResolvedConfiguration> = {}): ResolvedConfiguration => ({
+  const createMockConfig = (
+    overrides: Partial<ResolvedConfiguration> = {}
+  ): ResolvedConfiguration => ({
     apiKey: 'test-api-key',
     baseURL: 'https://api.example.com',
     maxStoredEvents: 1000,
@@ -200,10 +202,7 @@ describe('FetchNetworkClient', () => {
       const config = createMockConfig({ baseURL: 'https://api.test.com' });
       await networkClient.sendEvents(createMockPayload(), config);
 
-      expect(mockFetch).toHaveBeenCalledWith(
-        'https://api.test.com/v1/events',
-        expect.any(Object)
-      );
+      expect(mockFetch).toHaveBeenCalledWith('https://api.test.com/v1/events', expect.any(Object));
     });
 
     it('should use POST method', async () => {
