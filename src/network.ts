@@ -79,7 +79,7 @@ export class FetchNetworkClient implements INetworkClient {
       'Content-Type': 'application/json',
       'X-MGM-Key': config.apiKey,
       'X-MGM-SDK': config.sdk,
-      'X-MGM-SDK-Version': SDK_VERSION,
+      'X-MGM-SDK-Version': config.sdkVersion || SDK_VERSION,
       'X-MGM-Platform': config.platform,
       ...(osVersion && { 'X-MGM-Platform-Version': osVersion }),
     };

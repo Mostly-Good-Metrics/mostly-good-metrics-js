@@ -86,6 +86,12 @@ export interface MGMConfiguration {
   sdk?: SDK;
 
   /**
+   * The SDK version string. Auto-set but can be overridden by wrapper SDKs.
+   * Use this when wrapping the SDK (e.g., React Native SDK passes its own version).
+   */
+  sdkVersion?: string;
+
+  /**
    * Custom storage adapter. If not provided, uses localStorage in browsers
    * or in-memory storage in non-browser environments.
    */
