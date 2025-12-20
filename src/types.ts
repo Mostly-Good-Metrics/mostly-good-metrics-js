@@ -10,7 +10,7 @@ export interface MGMConfiguration {
 
   /**
    * The base URL for the MostlyGoodMetrics API.
-   * @default "https://mostlygoodmetrics.com"
+   * @default "https://ingest.mostlygoodmetrics.com"
    */
   baseURL?: string;
 
@@ -369,7 +369,7 @@ export const SystemProperties = {
  * Default configuration values.
  */
 export const DefaultConfiguration = {
-  baseURL: 'https://mostlygoodmetrics.com',
+  baseURL: 'https://ingest.mostlygoodmetrics.com',
   environment: 'production',
   maxBatchSize: 100,
   flushInterval: 30,
