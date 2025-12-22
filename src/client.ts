@@ -439,6 +439,15 @@ export class MostlyGoodMetrics {
       } else {
         logger.warn(`Failed to send events: ${result.error.message}`);
 
+        // Call onError callback if configured
+        if (this.config.onError) {
+          try {
+            this.config.onError(result.error);
+          } catch (e) {
+            logger.error('Error in onError callback', e);
+          }
+        }
+
         if (!result.shouldRetry) {
           // Drop events on non-retryable errors (4xx)
           logger.warn('Dropping events due to non-retryable error');
