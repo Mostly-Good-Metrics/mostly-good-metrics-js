@@ -93,11 +93,11 @@ describe('FetchNetworkClient', () => {
       expect(capturedHeaders['X-MGM-Platform-Version']).toBe('17.0');
     });
 
-    it('should include X-MGM-Key header with API key', async () => {
+    it('should include Authorization Bearer header with API key', async () => {
       const config = createMockConfig({ apiKey: 'my-secret-key' });
       await networkClient.sendEvents(createMockPayload(), config);
 
-      expect(capturedHeaders['X-MGM-Key']).toBe('my-secret-key');
+      expect(capturedHeaders['Authorization']).toBe('Bearer my-secret-key');
     });
 
     it('should include X-MGM-Bundle-Id when bundleId is configured', async () => {
@@ -124,7 +124,7 @@ describe('FetchNetworkClient', () => {
       });
       await networkClient.sendEvents(createMockPayload(), config);
 
-      expect(capturedHeaders['X-MGM-Key']).toBe('test-key');
+      expect(capturedHeaders['Authorization']).toBe('Bearer test-key');
       expect(capturedHeaders['X-MGM-SDK']).toBe('javascript');
       expect(capturedHeaders['X-MGM-SDK-Version']).toBeDefined();
       expect(capturedHeaders['X-MGM-Platform']).toBe('web');
