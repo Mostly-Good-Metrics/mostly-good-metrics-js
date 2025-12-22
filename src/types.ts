@@ -101,16 +101,24 @@ export interface MGMConfiguration {
    * Custom network client. If not provided, uses fetch-based client.
    */
   networkClient?: INetworkClient;
+
+  /**
+   * Callback invoked when a network error occurs.
+   * Useful for reporting errors to external services like Sentry.
+   * @param error The error that occurred
+   */
+  onError?: (error: MGMError) => void;
 }
 
 /**
  * Internal resolved configuration with all defaults applied.
  */
 export interface ResolvedConfiguration extends Required<
-  Omit<MGMConfiguration, 'storage' | 'networkClient'>
+  Omit<MGMConfiguration, 'storage' | 'networkClient' | 'onError'>
 > {
   storage?: IEventStorage;
   networkClient?: INetworkClient;
+  onError?: (error: MGMError) => void;
 }
 
 /**

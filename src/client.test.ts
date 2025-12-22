@@ -355,6 +355,78 @@ describe('MostlyGoodMetrics', () => {
       const count = await storage.eventCount();
       expect(count).toBe(0);
     });
+
+    it('should call onError callback when network error occurs', async () => {
+      const onError = jest.fn();
+      MostlyGoodMetrics.reset();
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+        onError,
+      });
+
+      networkClient.sendResult = {
+        success: false,
+        error: { name: 'MGMError', message: 'Server error', type: 'SERVER_ERROR' } as never,
+        shouldRetry: true,
+      };
+
+      MostlyGoodMetrics.track('test_event');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await MostlyGoodMetrics.flush();
+
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(onError).toHaveBeenCalledWith(expect.objectContaining({ type: 'SERVER_ERROR' }));
+    });
+
+    it('should not call onError callback on success', async () => {
+      const onError = jest.fn();
+      MostlyGoodMetrics.reset();
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+        onError,
+      });
+
+      networkClient.sendResult = { success: true };
+
+      MostlyGoodMetrics.track('test_event');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await MostlyGoodMetrics.flush();
+
+      expect(onError).not.toHaveBeenCalled();
+    });
+
+    it('should catch exceptions thrown by onError callback', async () => {
+      const onError = jest.fn().mockImplementation(() => {
+        throw new Error('Callback error');
+      });
+      MostlyGoodMetrics.reset();
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+        onError,
+      });
+
+      networkClient.sendResult = {
+        success: false,
+        error: { name: 'MGMError', message: 'Server error', type: 'SERVER_ERROR' } as never,
+        shouldRetry: true,
+      };
+
+      MostlyGoodMetrics.track('test_event');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      // Should not throw
+      await expect(MostlyGoodMetrics.flush()).resolves.not.toThrow();
+      expect(onError).toHaveBeenCalled();
+    });
   });
 
   describe('startNewSession', () => {

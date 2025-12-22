@@ -78,7 +78,7 @@ export class FetchNetworkClient implements INetworkClient {
     const sdkVersion = config.sdkVersion || SDK_VERSION;
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      'X-MGM-Key': config.apiKey,
+      Authorization: `Bearer ${config.apiKey}`,
       'X-MGM-SDK': config.sdk,
       'X-MGM-SDK-Version': sdkVersion,
       'X-MGM-Platform': config.platform,
