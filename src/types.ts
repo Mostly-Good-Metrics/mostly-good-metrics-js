@@ -161,12 +161,12 @@ export interface MGMEvent {
   /**
    * The user ID associated with this event.
    */
-  userId?: string;
+  user_id?: string;
 
   /**
    * The session ID associated with this event.
    */
-  sessionId?: string;
+  session_id?: string;
 
   /**
    * The platform this event was generated from.
@@ -176,17 +176,17 @@ export interface MGMEvent {
   /**
    * The app version string.
    */
-  appVersion?: string;
+  app_version?: string;
 
   /**
    * The app build number (separate from version).
    */
-  appBuildNumber?: string;
+  app_build_number?: string;
 
   /**
    * The OS version string.
    */
-  osVersion?: string;
+  os_version?: string;
 
   /**
    * The environment name.
@@ -196,7 +196,7 @@ export interface MGMEvent {
   /**
    * The device manufacturer (e.g., "Apple", "Samsung").
    */
-  deviceManufacturer?: string;
+  device_manufacturer?: string;
 
   /**
    * The user's locale (e.g., "en-US").
@@ -220,13 +220,13 @@ export interface MGMEvent {
  */
 export interface MGMEventContext {
   platform: Platform;
-  appVersion?: string;
-  appBuildNumber?: string;
-  osVersion?: string;
-  userId?: string;
-  sessionId?: string;
+  app_version?: string;
+  app_build_number?: string;
+  os_version?: string;
+  user_id?: string;
+  session_id?: string;
   environment: string;
-  deviceManufacturer?: string;
+  device_manufacturer?: string;
   locale?: string;
   timezone?: string;
 }
