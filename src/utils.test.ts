@@ -1,4 +1,5 @@
 import {
+  generateAnonymousId,
   generateUUID,
   getISOTimestamp,
   isValidEventName,
@@ -23,6 +24,26 @@ describe('generateUUID', () => {
       uuids.add(generateUUID());
     }
     expect(uuids.size).toBe(100);
+  });
+});
+
+describe('generateAnonymousId', () => {
+  it('should generate an ID with $anon_ prefix', () => {
+    const id = generateAnonymousId();
+    expect(id).toMatch(/^\$anon_[a-z0-9]{12}$/);
+  });
+
+  it('should generate unique IDs', () => {
+    const ids = new Set<string>();
+    for (let i = 0; i < 100; i++) {
+      ids.add(generateAnonymousId());
+    }
+    expect(ids.size).toBe(100);
+  });
+
+  it('should be 18 characters total ($anon_ + 12 random)', () => {
+    const id = generateAnonymousId();
+    expect(id.length).toBe(18);
   });
 });
 

@@ -16,6 +16,7 @@ import {
 import {
   delay,
   detectDeviceType,
+  generateAnonymousId,
   generateUUID,
   getDeviceModel,
   getISOTimestamp,
@@ -54,7 +55,10 @@ export class MostlyGoodMetrics {
 
     // Configure cookie settings before initializing anonymous ID
     persistence.configureCookies(config.cookieDomain, config.disableCookies);
-    this.anonymousIdValue = persistence.initializeAnonymousId(config.anonymousId, generateUUID);
+    this.anonymousIdValue = persistence.initializeAnonymousId(
+      config.anonymousId,
+      generateAnonymousId
+    );
 
     // Set up logging
     setDebugLogging(this.config.enableDebugLogging);
