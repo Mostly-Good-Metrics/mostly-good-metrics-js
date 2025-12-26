@@ -42,6 +42,7 @@ export class MostlyGoodMetrics {
   private flushTimer: ReturnType<typeof setInterval> | null = null;
   private isFlushingInternal = false;
   private sessionIdValue: string;
+  private anonymousIdValue: string;
   private lifecycleSetup = false;
 
   /**
@@ -50,6 +51,10 @@ export class MostlyGoodMetrics {
   private constructor(config: MGMConfiguration) {
     this.config = resolveConfiguration(config);
     this.sessionIdValue = generateUUID();
+
+    // Configure cookie settings before initializing anonymous ID
+    persistence.configureCookies(config.cookieDomain, config.disableCookies);
+    this.anonymousIdValue = persistence.initializeAnonymousId(config.anonymousId, generateUUID);
 
     // Set up logging
     setDebugLogging(this.config.enableDebugLogging);
@@ -113,9 +118,9 @@ export class MostlyGoodMetrics {
     }
   }
 
-  // ============================================================
+  // =====================================================
   // Static convenience methods (delegate to shared instance)
-  // ============================================================
+  // =====================================================
 
   /**
    * Track an event with the given name and optional properties.
@@ -201,9 +206,9 @@ export class MostlyGoodMetrics {
     return MostlyGoodMetrics.instance?.getSuperProperties() ?? {};
   }
 
-  // ============================================================
+  // =====================================================
   // Instance properties
-  // ============================================================
+  // =====================================================
 
   /**
    * Get the current user ID.
@@ -220,6 +225,13 @@ export class MostlyGoodMetrics {
   }
 
   /**
+   * Get the anonymous ID (auto-generated UUID, persisted across sessions).
+   */
+  get anonymousId(): string {
+    return this.anonymousIdValue;
+  }
+
+  /**
    * Check if a flush operation is in progress.
    */
   get isFlushing(): boolean {
@@ -233,9 +245,9 @@ export class MostlyGoodMetrics {
     return { ...this.config };
   }
 
-  // ============================================================
+  // =====================================================
   // Instance methods
-  // ============================================================
+  // =====================================================
 
   /**
    * Track an event with the given name and optional properties.
@@ -265,7 +277,9 @@ export class MostlyGoodMetrics {
       name,
       client_event_id: generateUUID(),
       timestamp: getISOTimestamp(),
-      user_id: this.userId ?? undefined,
+
+      user_id: this.userId ?? this.anonymousIdValue,
+
       session_id: this.sessionIdValue,
       platform: this.config.platform,
       app_version: this.config.appVersion || undefined,
@@ -398,9 +412,9 @@ export class MostlyGoodMetrics {
     logger.debug('MostlyGoodMetrics instance destroyed');
   }
 
-  // ============================================================
+  // =====================================================
   // Private methods
-  // ============================================================
+  // =====================================================
 
   private async checkBatchSize(): Promise<void> {
     const count = await this.storage.eventCount();
@@ -468,7 +482,9 @@ export class MostlyGoodMetrics {
       platform: this.config.platform,
       app_version: this.config.appVersion || undefined,
       os_version: this.config.osVersion || getOSVersion() || undefined,
-      user_id: this.userId ?? undefined,
+
+      user_id: this.userId ?? this.anonymousIdValue,
+
       session_id: this.sessionIdValue,
       environment: this.config.environment,
       locale: getLocale(),

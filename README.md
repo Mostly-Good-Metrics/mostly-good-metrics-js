@@ -50,7 +50,7 @@ MostlyGoodMetrics.track('purchase_completed', {
 ### 3. Identify Users
 
 ```typescript
-// Set user identity
+// Set user identity (optional - anonymous ID is auto-generated)
 MostlyGoodMetrics.identify('user_123');
 
 // Reset identity (e.g., on logout)
@@ -58,6 +58,48 @@ MostlyGoodMetrics.resetIdentity();
 ```
 
 That's it! Events are automatically batched and sent.
+
+## User Identification
+
+The SDK automatically generates and persists an anonymous `user_id` (UUID) for each user. This ID:
+- Is auto-generated on first visit
+- Persists across sessions (stored in cookies and localStorage)
+- Is included in every event as `user_id`
+
+When you call `identify()`, the identified user ID takes precedence over the anonymous ID.
+
+```typescript
+// Before identify(): user_id = "550e8400-e29b-41d4-a716-446655440000" (auto-generated)
+MostlyGoodMetrics.identify('user_123');
+// After identify(): user_id = "user_123"
+
+MostlyGoodMetrics.resetIdentity();
+// After reset: user_id = "550e8400-e29b-41d4-a716-446655440000" (back to anonymous)
+```
+
+### Cross-Subdomain Tracking
+
+By default, the anonymous ID is stored in cookies (with localStorage fallback). To share the anonymous ID across subdomains:
+
+```typescript
+MostlyGoodMetrics.configure({
+  apiKey: 'mgm_proj_your_api_key',
+  cookieDomain: '.yourdomain.com', // Share across all subdomains
+});
+```
+
+This allows tracking the same user across `app.yourdomain.com`, `www.yourdomain.com`, etc.
+
+### Privacy Mode (No Cookies)
+
+For GDPR compliance or privacy-focused applications, you can disable cookies entirely:
+
+```typescript
+MostlyGoodMetrics.configure({
+  apiKey: 'mgm_proj_your_api_key',
+  disableCookies: true, // Only use localStorage
+});
+```
 
 ## Configuration Options
 
@@ -87,14 +129,17 @@ MostlyGoodMetrics.configure({
 | `flushInterval` | `30` | Auto-flush interval in seconds |
 | `maxStoredEvents` | `10000` | Max cached events |
 | `enableDebugLogging` | `false` | Enable console output |
-| `trackAppLifecycleEvents` | `true` | Auto-track lifecycle events |
+| `trackAppLifecycleEvents` | `false` | Auto-track lifecycle events ($app_opened, etc.) |
 | `bundleId` | auto-detected | Custom bundle identifier |
+| `cookieDomain` | - | Cookie domain for cross-subdomain tracking (e.g., `.example.com`) |
+| `disableCookies` | `false` | Disable cookies, use only localStorage |
+| `anonymousId` | auto-generated | Override anonymous ID (for wrapper SDKs like React Native) |
 | `storage` | auto-detected | Custom storage adapter |
 | `networkClient` | fetch-based | Custom network client |
 
 ## Automatic Events
 
-When `trackAppLifecycleEvents` is enabled (default), the SDK automatically tracks:
+When `trackAppLifecycleEvents` is enabled, the SDK automatically tracks:
 
 | Event | When | Properties |
 |-------|------|------------|
@@ -177,6 +222,7 @@ console.log(`${count} events pending`);
 
 The SDK automatically:
 
+- **Generates anonymous user ID** (UUID, persisted in cookies + localStorage)
 - **Persists events** to localStorage (with in-memory fallback)
 - **Batches events** for efficient network usage
 - **Flushes on interval** (default: every 30 seconds)
@@ -184,7 +230,7 @@ The SDK automatically:
 - **Compresses payloads** using gzip for large batches (>1KB)
 - **Retries on failure** for network errors (events are preserved)
 - **Handles rate limiting** with exponential backoff
-- **Persists user ID** across page loads
+- **Persists identified user ID** across page loads
 - **Generates session IDs** per page load
 
 ## Debug Logging

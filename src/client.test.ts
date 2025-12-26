@@ -283,6 +283,86 @@ describe('MostlyGoodMetrics', () => {
       MostlyGoodMetrics.resetIdentity();
       expect(MostlyGoodMetrics.shared?.userId).toBeNull();
     });
+
+    it('should keep anonymousId unchanged', () => {
+      const originalAnonymousId = MostlyGoodMetrics.shared?.anonymousId;
+      MostlyGoodMetrics.resetIdentity();
+      const newAnonymousId = MostlyGoodMetrics.shared?.anonymousId;
+      expect(newAnonymousId).toBe(originalAnonymousId);
+    });
+  });
+
+  describe('anonymousId', () => {
+    it('should auto-generate anonymousId on init', () => {
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+      });
+      expect(MostlyGoodMetrics.shared?.anonymousId).toBeDefined();
+      expect(MostlyGoodMetrics.shared?.anonymousId.length).toBeGreaterThan(0);
+    });
+
+    it('should include anonymousId as user_id in events when not identified', async () => {
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+      });
+      MostlyGoodMetrics.track('test_event');
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const events = await storage.fetchEvents(1);
+      expect(events[0].user_id).toBe(MostlyGoodMetrics.shared?.anonymousId);
+    });
+
+    it('should allow wrapper SDK to override anonymousId', () => {
+      const customAnonymousId = 'react-native-device-id-12345';
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+        anonymousId: customAnonymousId,
+      });
+      expect(MostlyGoodMetrics.shared?.anonymousId).toBe(customAnonymousId);
+    });
+
+    it('should include custom anonymousId as user_id in events', async () => {
+      const customAnonymousId = 'react-native-device-id-12345';
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+        anonymousId: customAnonymousId,
+      });
+      MostlyGoodMetrics.track('test_event');
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const events = await storage.fetchEvents(1);
+      expect(events[0].user_id).toBe(customAnonymousId);
+    });
+
+    it('should use identified userId over anonymousId', async () => {
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+      });
+      MostlyGoodMetrics.identify('identified_user_123');
+      MostlyGoodMetrics.track('test_event');
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const events = await storage.fetchEvents(1);
+      expect(events[0].user_id).toBe('identified_user_123');
+    });
   });
 
   describe('flush', () => {

@@ -50,7 +50,7 @@ export interface MGMConfiguration {
   /**
    * Whether to automatically track app lifecycle events
    * ($app_opened, $app_backgrounded, $app_installed, $app_updated).
-   * @default true
+   * @default false
    */
   trackAppLifecycleEvents?: boolean;
 
@@ -92,6 +92,28 @@ export interface MGMConfiguration {
   sdkVersion?: string;
 
   /**
+   * Override the auto-generated anonymous user ID.
+   * Wrapper SDKs (e.g., React Native) can pass a device-specific ID here.
+   * If not provided, a UUID will be auto-generated and persisted.
+   */
+  anonymousId?: string;
+
+  /**
+   * Cookie domain for cross-subdomain tracking.
+   * Set to '.yourdomain.com' to share anonymous ID across subdomains.
+   * Example: '.example.com' allows sharing between app.example.com and www.example.com
+   */
+  cookieDomain?: string;
+
+  /**
+   * Disable cookie storage entirely.
+   * When true, only localStorage will be used (no cross-subdomain tracking).
+   * Useful for GDPR compliance or privacy-focused applications.
+   * @default false
+   */
+  disableCookies?: boolean;
+
+  /**
    * Custom storage adapter. If not provided, uses localStorage in browsers
    * or in-memory storage in non-browser environments.
    */
@@ -114,7 +136,10 @@ export interface MGMConfiguration {
  * Internal resolved configuration with all defaults applied.
  */
 export interface ResolvedConfiguration extends Required<
-  Omit<MGMConfiguration, 'storage' | 'networkClient' | 'onError'>
+  Omit<
+    MGMConfiguration,
+    'storage' | 'networkClient' | 'onError' | 'anonymousId' | 'cookieDomain' | 'disableCookies'
+  >
 > {
   storage?: IEventStorage;
   networkClient?: INetworkClient;
@@ -160,8 +185,10 @@ export interface MGMEvent {
 
   /**
    * The user ID associated with this event.
+   * Uses identified user if set, otherwise falls back to anonymous UUID.
    */
-  user_id?: string;
+
+  user_id: string;
 
   /**
    * The session ID associated with this event.
@@ -223,7 +250,9 @@ export interface MGMEventContext {
   app_version?: string;
   app_build_number?: string;
   os_version?: string;
-  user_id?: string;
+
+  user_id: string;
+
   session_id?: string;
   environment: string;
   device_manufacturer?: string;
@@ -383,7 +412,7 @@ export const DefaultConfiguration = {
   flushInterval: 30,
   maxStoredEvents: 10000,
   enableDebugLogging: false,
-  trackAppLifecycleEvents: true,
+  trackAppLifecycleEvents: false,
 } as const;
 
 /**
