@@ -3,6 +3,7 @@ import { Constraints, EventProperties, IEventStorage, MGMError, MGMEvent } from 
 
 const STORAGE_KEY = 'mostlygoodmetrics_events';
 const USER_ID_KEY = 'mostlygoodmetrics_user_id';
+const ANONYMOUS_ID_KEY = 'mostlygoodmetrics_anonymous_id';
 const APP_VERSION_KEY = 'mostlygoodmetrics_app_version';
 const SUPER_PROPERTIES_KEY = 'mostlygoodmetrics_super_properties';
 
@@ -21,6 +22,59 @@ function isLocalStorageAvailable(): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Check if cookies are available in this environment.
+ */
+function isCookieAvailable(): boolean {
+  try {
+    if (typeof document === 'undefined' || typeof document.cookie === 'undefined') {
+      return false;
+    }
+    // Test if we can actually set a cookie
+    const testKey = '__mgm_cookie_test__';
+    document.cookie = `${testKey}=test; path=/; max-age=60`;
+    const hasTest = document.cookie.indexOf(testKey) !== -1;
+    // Clean up test cookie
+    document.cookie = `${testKey}=; path=/; max-age=0`;
+    return hasTest;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Get a cookie value by name.
+ */
+function getCookie(name: string): string | null {
+  if (!isCookieAvailable()) {
+    return null;
+  }
+  const cookies = document.cookie.split(';');
+  for (const cookie of cookies) {
+    const [cookieName, cookieValue] = cookie.trim().split('=');
+    if (cookieName === name) {
+      return decodeURIComponent(cookieValue);
+    }
+  }
+  return null;
+}
+
+/**
+ * Set a cookie with optional domain for cross-subdomain support.
+ * Uses a 1-year expiry by default.
+ */
+function setCookie(name: string, value: string, domain?: string): void {
+  if (!isCookieAvailable()) {
+    return;
+  }
+  const maxAge = 365 * 24 * 60 * 60; // 1 year in seconds
+  let cookieString = `${name}=${encodeURIComponent(value)}; path=/; max-age=${maxAge}; SameSite=Lax`;
+  if (domain) {
+    cookieString += `; domain=${domain}`;
+  }
+  document.cookie = cookieString;
 }
 
 /**
@@ -173,12 +227,32 @@ export function createDefaultStorage(maxEvents: number): IEventStorage {
 
 /**
  * Persistence helpers for user ID and app version.
- * These use localStorage when available, otherwise fall back to in-memory.
+ * Uses cookies first (for cross-subdomain support), then localStorage as fallback.
  */
 class PersistenceManager {
   private inMemoryUserId: string | null = null;
+  private inMemoryAnonymousId: string | null = null;
   private inMemoryAppVersion: string | null = null;
   private inMemorySuperProperties: EventProperties = {};
+  private cookieDomain: string | undefined = undefined;
+  private disableCookies = false;
+
+  /**
+   * Configure cookie settings.
+   * @param cookieDomain Domain for cross-subdomain cookies (e.g., '.example.com')
+   * @param disableCookies If true, only use localStorage (no cookies)
+   */
+  configureCookies(cookieDomain?: string, disableCookies?: boolean): void {
+    this.cookieDomain = cookieDomain;
+    this.disableCookies = disableCookies ?? false;
+  }
+
+  /**
+   * Check if cookies should be used.
+   */
+  private shouldUseCookies(): boolean {
+    return !this.disableCookies && isCookieAvailable();
+  }
 
   /**
    * Get the persisted user ID.
@@ -202,6 +276,84 @@ class PersistenceManager {
       }
     }
     this.inMemoryUserId = userId;
+  }
+
+  /**
+   * Get the anonymous ID (auto-generated UUID).
+   * Checks cookies first, then localStorage, then in-memory.
+   */
+  getAnonymousId(): string | null {
+    // Try cookies first (for cross-subdomain support)
+    if (this.shouldUseCookies()) {
+      const cookieId = getCookie(ANONYMOUS_ID_KEY);
+      if (cookieId) {
+        return cookieId;
+      }
+    }
+
+    // Fall back to localStorage
+    if (isLocalStorageAvailable()) {
+      return localStorage.getItem(ANONYMOUS_ID_KEY);
+    }
+
+    return this.inMemoryAnonymousId;
+  }
+
+  /**
+   * Set the anonymous ID (persists across sessions).
+   * Saves to both cookies and localStorage for redundancy.
+   */
+  setAnonymousId(anonymousId: string): void {
+    // Save to cookies if enabled
+    if (this.shouldUseCookies()) {
+      setCookie(ANONYMOUS_ID_KEY, anonymousId, this.cookieDomain);
+    }
+
+    // Also save to localStorage as fallback
+    if (isLocalStorageAvailable()) {
+      localStorage.setItem(ANONYMOUS_ID_KEY, anonymousId);
+    }
+
+    this.inMemoryAnonymousId = anonymousId;
+  }
+
+  /**
+   * Initialize the anonymous ID. If an override is provided, use it.
+   * Otherwise, use existing persisted ID or generate a new UUID.
+   * @param overrideId Optional ID from wrapper SDK (e.g., React Native device ID)
+   * @param generateUUID Function to generate a UUID
+   */
+  initializeAnonymousId(overrideId: string | undefined, generateUUID: () => string): string {
+    // If wrapper SDK provides an override, always use it
+    if (overrideId) {
+      this.setAnonymousId(overrideId);
+      return overrideId;
+    }
+
+    // Check for existing persisted anonymous ID
+    const existingId = this.getAnonymousId();
+    if (existingId) {
+      // Ensure it's saved to cookies if we have cookie support now
+      if (this.shouldUseCookies() && !getCookie(ANONYMOUS_ID_KEY)) {
+        setCookie(ANONYMOUS_ID_KEY, existingId, this.cookieDomain);
+      }
+      return existingId;
+    }
+
+    // Generate and persist a new anonymous ID
+    const newId = generateUUID();
+    this.setAnonymousId(newId);
+    return newId;
+  }
+
+  /**
+   * Reset the anonymous ID to a new UUID.
+   * @param generateUUID Function to generate a UUID
+   */
+  resetAnonymousId(generateUUID: () => string): string {
+    const newId = generateUUID();
+    this.setAnonymousId(newId);
+    return newId;
   }
 
   /**

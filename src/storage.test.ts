@@ -322,3 +322,129 @@ describe('PersistenceManager super properties', () => {
     expect(props).toEqual({});
   });
 });
+
+describe('PersistenceManager anonymous ID (localStorage)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (localStorage.getItem as jest.Mock).mockReturnValue(null);
+    // Disable cookies for these tests to test localStorage behavior
+    persistence.configureCookies(undefined, true);
+  });
+
+  const generateMockUUID = () => 'mock-uuid-12345';
+
+  it('should generate anonymous ID if none exists', () => {
+    const id = persistence.initializeAnonymousId(undefined, generateMockUUID);
+    expect(id).toBe('mock-uuid-12345');
+    expect(localStorage.setItem).toHaveBeenCalledWith(
+      'mostlygoodmetrics_anonymous_id',
+      'mock-uuid-12345'
+    );
+  });
+
+  it('should return existing anonymous ID from localStorage', () => {
+    (localStorage.getItem as jest.Mock).mockReturnValueOnce('existing-anonymous-id');
+    const id = persistence.initializeAnonymousId(undefined, generateMockUUID);
+    expect(id).toBe('existing-anonymous-id');
+  });
+
+  it('should use override ID from wrapper SDK', () => {
+    const overrideId = 'react-native-device-id';
+    const id = persistence.initializeAnonymousId(overrideId, generateMockUUID);
+    expect(id).toBe(overrideId);
+    expect(localStorage.setItem).toHaveBeenCalledWith('mostlygoodmetrics_anonymous_id', overrideId);
+  });
+
+  it('should prefer override ID over existing persisted ID', () => {
+    (localStorage.getItem as jest.Mock).mockReturnValueOnce('existing-anonymous-id');
+    const overrideId = 'react-native-device-id';
+    const id = persistence.initializeAnonymousId(overrideId, generateMockUUID);
+    expect(id).toBe(overrideId);
+  });
+
+  it('should reset anonymous ID with new UUID', () => {
+    let callCount = 0;
+    const generateNewUUID = () => {
+      callCount++;
+      return `new-uuid-${callCount}`;
+    };
+
+    const id1 = persistence.resetAnonymousId(generateNewUUID);
+    expect(id1).toBe('new-uuid-1');
+
+    const id2 = persistence.resetAnonymousId(generateNewUUID);
+    expect(id2).toBe('new-uuid-2');
+    expect(id2).not.toBe(id1);
+  });
+
+  it('should persist anonymous ID to localStorage', () => {
+    persistence.setAnonymousId('test-anonymous-id');
+    expect(localStorage.setItem).toHaveBeenCalledWith(
+      'mostlygoodmetrics_anonymous_id',
+      'test-anonymous-id'
+    );
+  });
+
+  it('should get anonymous ID from localStorage', () => {
+    (localStorage.getItem as jest.Mock).mockReturnValueOnce('stored-anonymous-id');
+    const id = persistence.getAnonymousId();
+    expect(id).toBe('stored-anonymous-id');
+  });
+});
+
+describe('PersistenceManager anonymous ID (cookies)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (localStorage.getItem as jest.Mock).mockReturnValue(null);
+    // Clear document.cookie
+    document.cookie = 'mostlygoodmetrics_anonymous_id=; path=/; max-age=0';
+  });
+
+  const generateMockUUID = () => 'mock-uuid-12345';
+
+  it('should use cookies when enabled', () => {
+    persistence.configureCookies(undefined, false);
+    persistence.setAnonymousId('cookie-test-id');
+    expect(document.cookie).toContain('mostlygoodmetrics_anonymous_id=cookie-test-id');
+  });
+
+  it('should read from cookies before localStorage', () => {
+    persistence.configureCookies(undefined, false);
+    document.cookie = 'mostlygoodmetrics_anonymous_id=cookie-id; path=/';
+    (localStorage.getItem as jest.Mock).mockReturnValue('localStorage-id');
+
+    const id = persistence.getAnonymousId();
+    expect(id).toBe('cookie-id');
+  });
+
+  it('should fall back to localStorage when cookie is not set', () => {
+    persistence.configureCookies(undefined, false);
+    (localStorage.getItem as jest.Mock).mockReturnValue('localStorage-id');
+
+    const id = persistence.getAnonymousId();
+    expect(id).toBe('localStorage-id');
+  });
+
+  it('should set cookie with custom domain for cross-subdomain support', () => {
+    persistence.configureCookies('.example.com', false);
+    persistence.setAnonymousId('cross-domain-id');
+    // Note: jsdom rejects cookies for non-matching domains, so we verify localStorage fallback
+    // In real browsers, the cookie would be set with domain=.example.com
+    expect(localStorage.setItem).toHaveBeenCalledWith(
+      'mostlygoodmetrics_anonymous_id',
+      'cross-domain-id'
+    );
+  });
+
+  it('should not use cookies when disabled', () => {
+    persistence.configureCookies(undefined, true);
+    persistence.setAnonymousId('no-cookie-id');
+    // Cookie should not contain our ID (cleared in beforeEach)
+    expect(document.cookie).not.toContain('mostlygoodmetrics_anonymous_id=no-cookie-id');
+    // But localStorage should have it
+    expect(localStorage.setItem).toHaveBeenCalledWith(
+      'mostlygoodmetrics_anonymous_id',
+      'no-cookie-id'
+    );
+  });
+});
