@@ -258,7 +258,7 @@ describe('MostlyGoodMetrics', () => {
       await new Promise((resolve) => setTimeout(resolve, 10));
 
       const events = await storage.fetchEvents(1);
-      expect(events[0].userId).toBe('user_456');
+      expect(events[0].user_id).toBe('user_456');
     });
 
     it('should not set empty userId', () => {
