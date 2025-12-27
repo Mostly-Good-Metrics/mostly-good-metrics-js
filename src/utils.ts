@@ -30,6 +30,35 @@ export function generateUUID(): string {
 }
 
 /**
+ * Generate a short random string for anonymous IDs.
+ * Uses base36 (0-9, a-z) for URL-safe, readable IDs.
+ */
+function generateRandomString(length: number): string {
+  const chars = '0123456789abcdefghijklmnopqrstuvwxyz';
+  let result = '';
+  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+    const array = new Uint8Array(length);
+    crypto.getRandomValues(array);
+    for (let i = 0; i < length; i++) {
+      result += chars[array[i] % chars.length];
+    }
+  } else {
+    for (let i = 0; i < length; i++) {
+      result += chars[Math.floor(Math.random() * chars.length)];
+    }
+  }
+  return result;
+}
+
+/**
+ * Generate an anonymous user ID with $anon_ prefix.
+ * Format: $anon_xxxxxxxxxxxx (12 random chars)
+ */
+export function generateAnonymousId(): string {
+  return `$anon_${generateRandomString(12)}`;
+}
+
+/**
  * Get the current timestamp in ISO8601 format.
  */
 export function getISOTimestamp(): string {

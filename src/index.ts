@@ -65,6 +65,7 @@ export { FetchNetworkClient, createDefaultNetworkClient } from './network';
 
 // Utilities (for advanced usage)
 export {
+  generateAnonymousId,
   generateUUID,
   getISOTimestamp,
   isValidEventName,
