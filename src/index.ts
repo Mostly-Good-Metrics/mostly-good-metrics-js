@@ -19,8 +19,11 @@
  *   page: '/checkout',
  * });
  *
- * // Identify users
- * MostlyGoodMetrics.identify('user_123');
+ * // Identify users with profile data
+ * MostlyGoodMetrics.identify('user_123', {
+ *   email: 'user@example.com',
+ *   name: 'Jane Doe',
+ * });
  * ```
  */
 
@@ -43,6 +46,7 @@ export type {
   SendResult,
   IEventStorage,
   INetworkClient,
+  UserProfile,
 } from './types';
 
 // Error class

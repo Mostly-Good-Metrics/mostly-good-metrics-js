@@ -12,6 +12,7 @@ import {
   ResolvedConfiguration,
   SystemEvents,
   SystemProperties,
+  UserProfile,
 } from './types';
 import {
   delay,
@@ -134,10 +135,12 @@ export class MostlyGoodMetrics {
   }
 
   /**
-   * Identify the current user.
+   * Identify the current user with optional profile data.
+   * @param userId The user's unique identifier
+   * @param profile Optional profile data (email, name)
    */
-  static identify(userId: string): void {
-    MostlyGoodMetrics.instance?.identify(userId);
+  static identify(userId: string, profile?: UserProfile): void {
+    MostlyGoodMetrics.instance?.identify(userId, profile);
   }
 
   /**
@@ -306,9 +309,14 @@ export class MostlyGoodMetrics {
   }
 
   /**
-   * Identify the current user.
+   * Identify the current user with optional profile data.
+   * Profile data is sent to the backend via the $identify event.
+   * Debouncing: only sends $identify if payload changed or >24h since last send.
+   *
+   * @param userId The user's unique identifier
+   * @param profile Optional profile data (email, name)
    */
-  identify(userId: string): void {
+  identify(userId: string, profile?: UserProfile): void {
     if (!userId) {
       logger.warn('identify called with empty userId');
       return;
@@ -316,14 +324,75 @@ export class MostlyGoodMetrics {
 
     logger.debug(`Identifying user: ${userId}`);
     persistence.setUserId(userId);
+
+    // If profile data is provided, check if we should send $identify event
+    if (profile && (profile.email || profile.name)) {
+      this.sendIdentifyEventIfNeeded(userId, profile);
+    }
+  }
+
+  /**
+   * Send $identify event if debounce conditions are met.
+   * Only sends if: hash changed OR more than 24 hours since last send.
+   */
+  private sendIdentifyEventIfNeeded(userId: string, profile: UserProfile): void {
+    // Compute hash of the identify payload
+    const payloadString = JSON.stringify({ userId, email: profile.email, name: profile.name });
+    const currentHash = this.simpleHash(payloadString);
+
+    const storedHash = persistence.getIdentifyHash();
+    const lastSentAt = persistence.getIdentifyLastSentAt();
+    const now = Date.now();
+    const twentyFourHoursMs = 24 * 60 * 60 * 1000;
+
+    const hashChanged = storedHash !== currentHash;
+    const expiredTime = !lastSentAt || (now - lastSentAt) > twentyFourHoursMs;
+
+    if (hashChanged || expiredTime) {
+      logger.debug(`Sending $identify event (hashChanged=${hashChanged}, expiredTime=${expiredTime})`);
+
+      // Build properties object with only defined values
+      const properties: EventProperties = {};
+      if (profile.email) {
+        properties.email = profile.email;
+      }
+      if (profile.name) {
+        properties.name = profile.name;
+      }
+
+      // Track the $identify event
+      this.track(SystemEvents.IDENTIFY, properties);
+
+      // Update stored hash and timestamp
+      persistence.setIdentifyHash(currentHash);
+      persistence.setIdentifyLastSentAt(now);
+    } else {
+      logger.debug('Skipping $identify event (debounced)');
+    }
+  }
+
+  /**
+   * Simple hash function for debouncing.
+   * Uses a basic string hash - not cryptographic, just for comparison.
+   */
+  private simpleHash(str: string): string {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      const char = str.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash; // Convert to 32-bit integer
+    }
+    return hash.toString(16);
   }
 
   /**
    * Reset user identity.
+   * Clears the user ID and identify debounce state.
    */
   resetIdentity(): void {
     logger.debug('Resetting user identity');
     persistence.setUserId(null);
+    persistence.clearIdentifyState();
   }
 
   /**

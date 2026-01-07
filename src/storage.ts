@@ -6,6 +6,8 @@ const USER_ID_KEY = 'mostlygoodmetrics_user_id';
 const ANONYMOUS_ID_KEY = 'mostlygoodmetrics_anonymous_id';
 const APP_VERSION_KEY = 'mostlygoodmetrics_app_version';
 const SUPER_PROPERTIES_KEY = 'mostlygoodmetrics_super_properties';
+const IDENTIFY_HASH_KEY = 'mostlygoodmetrics_identify_hash';
+const IDENTIFY_TIMESTAMP_KEY = 'mostlygoodmetrics_identify_timestamp';
 
 /**
  * Check if we're running in a browser environment with localStorage available.
@@ -459,6 +461,55 @@ class PersistenceManager {
       } catch (e) {
         logger.warn('Failed to save super properties to localStorage', e);
       }
+    }
+  }
+
+  /**
+   * Get the stored identify hash (for debouncing).
+   */
+  getIdentifyHash(): string | null {
+    if (isLocalStorageAvailable()) {
+      return localStorage.getItem(IDENTIFY_HASH_KEY);
+    }
+    return null;
+  }
+
+  /**
+   * Set the identify hash.
+   */
+  setIdentifyHash(hash: string): void {
+    if (isLocalStorageAvailable()) {
+      localStorage.setItem(IDENTIFY_HASH_KEY, hash);
+    }
+  }
+
+  /**
+   * Get the timestamp of the last identify event sent.
+   */
+  getIdentifyLastSentAt(): number | null {
+    if (isLocalStorageAvailable()) {
+      const timestamp = localStorage.getItem(IDENTIFY_TIMESTAMP_KEY);
+      return timestamp ? parseInt(timestamp, 10) : null;
+    }
+    return null;
+  }
+
+  /**
+   * Set the timestamp of the last identify event sent.
+   */
+  setIdentifyLastSentAt(timestamp: number): void {
+    if (isLocalStorageAvailable()) {
+      localStorage.setItem(IDENTIFY_TIMESTAMP_KEY, timestamp.toString());
+    }
+  }
+
+  /**
+   * Clear identify debounce state (used when resetting identity).
+   */
+  clearIdentifyState(): void {
+    if (isLocalStorageAvailable()) {
+      localStorage.removeItem(IDENTIFY_HASH_KEY);
+      localStorage.removeItem(IDENTIFY_TIMESTAMP_KEY);
     }
   }
 }
