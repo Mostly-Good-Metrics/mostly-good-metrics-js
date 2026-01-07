@@ -326,6 +326,7 @@ export class MostlyGoodMetrics {
     persistence.setUserId(userId);
 
     // If profile data is provided, check if we should send $identify event
+    // eslint-disable-next-line @typescript-eslint/prefer-nullish-coalescing -- intentional truthy check for non-empty strings
     if (profile && (profile.email || profile.name)) {
       this.sendIdentifyEventIfNeeded(userId, profile);
     }
@@ -346,10 +347,12 @@ export class MostlyGoodMetrics {
     const twentyFourHoursMs = 24 * 60 * 60 * 1000;
 
     const hashChanged = storedHash !== currentHash;
-    const expiredTime = !lastSentAt || (now - lastSentAt) > twentyFourHoursMs;
+    const expiredTime = !lastSentAt || now - lastSentAt > twentyFourHoursMs;
 
     if (hashChanged || expiredTime) {
-      logger.debug(`Sending $identify event (hashChanged=${hashChanged}, expiredTime=${expiredTime})`);
+      logger.debug(
+        `Sending $identify event (hashChanged=${hashChanged}, expiredTime=${expiredTime})`
+      );
 
       // Build properties object with only defined values
       const properties: EventProperties = {};
@@ -379,7 +382,7 @@ export class MostlyGoodMetrics {
     let hash = 0;
     for (let i = 0; i < str.length; i++) {
       const char = str.charCodeAt(i);
-      hash = ((hash << 5) - hash) + char;
+      hash = (hash << 5) - hash + char;
       hash = hash & hash; // Convert to 32-bit integer
     }
     return hash.toString(16);
