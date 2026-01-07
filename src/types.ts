@@ -389,7 +389,23 @@ export const SystemEvents = {
   APP_UPDATED: '$app_updated',
   APP_OPENED: '$app_opened',
   APP_BACKGROUNDED: '$app_backgrounded',
+  IDENTIFY: '$identify',
 } as const;
+
+/**
+ * User profile data for the identify() call.
+ */
+export interface UserProfile {
+  /**
+   * The user's email address.
+   */
+  email?: string;
+
+  /**
+   * The user's display name.
+   */
+  name?: string;
+}
 
 /**
  * System property keys (prefixed with $).

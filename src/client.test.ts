@@ -266,6 +266,97 @@ describe('MostlyGoodMetrics', () => {
       MostlyGoodMetrics.identify('');
       expect(MostlyGoodMetrics.shared?.userId).toBe('user_123');
     });
+
+    it('should send $identify event with email', async () => {
+      MostlyGoodMetrics.resetIdentity(); // Clear any previous identify state
+      MostlyGoodMetrics.identify('user_123', { email: 'test@example.com' });
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const events = await storage.fetchEvents(10);
+      const identifyEvent = events.find((e) => e.name === '$identify');
+      expect(identifyEvent).toBeDefined();
+      expect(identifyEvent?.properties?.email).toBe('test@example.com');
+      expect(identifyEvent?.properties?.name).toBeUndefined();
+    });
+
+    it('should send $identify event with name', async () => {
+      MostlyGoodMetrics.resetIdentity(); // Clear any previous identify state
+      MostlyGoodMetrics.identify('user_123', { name: 'John Doe' });
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const events = await storage.fetchEvents(10);
+      const identifyEvent = events.find((e) => e.name === '$identify');
+      expect(identifyEvent).toBeDefined();
+      expect(identifyEvent?.properties?.name).toBe('John Doe');
+      expect(identifyEvent?.properties?.email).toBeUndefined();
+    });
+
+    it('should send $identify event with both email and name', async () => {
+      MostlyGoodMetrics.resetIdentity(); // Clear any previous identify state
+      MostlyGoodMetrics.identify('user_123', { email: 'test@example.com', name: 'John Doe' });
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const events = await storage.fetchEvents(10);
+      const identifyEvent = events.find((e) => e.name === '$identify');
+      expect(identifyEvent).toBeDefined();
+      expect(identifyEvent?.properties?.email).toBe('test@example.com');
+      expect(identifyEvent?.properties?.name).toBe('John Doe');
+    });
+
+    it('should not send $identify event without profile data', async () => {
+      MostlyGoodMetrics.resetIdentity(); // Clear any previous identify state
+      MostlyGoodMetrics.identify('user_123');
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const events = await storage.fetchEvents(10);
+      const identifyEvent = events.find((e) => e.name === '$identify');
+      expect(identifyEvent).toBeUndefined();
+    });
+
+    it('should debounce $identify event with same profile data', async () => {
+      MostlyGoodMetrics.resetIdentity(); // Clear any previous identify state
+
+      MostlyGoodMetrics.identify('user_123', { email: 'debounce-test@example.com' });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      // Call again with same data - should not send another event
+      MostlyGoodMetrics.identify('user_123', { email: 'debounce-test@example.com' });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const events = await storage.fetchEvents(10);
+      const identifyEvents = events.filter((e) => e.name === '$identify');
+      expect(identifyEvents.length).toBe(1);
+    });
+
+    it('should send new $identify event when profile data changes', async () => {
+      MostlyGoodMetrics.resetIdentity(); // Clear any previous identify state
+
+      MostlyGoodMetrics.identify('user_123', { email: 'change-test@example.com' });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      // Call with different email - should send new event
+      MostlyGoodMetrics.identify('user_123', { email: 'changed@example.com' });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const events = await storage.fetchEvents(10);
+      const identifyEvents = events.filter((e) => e.name === '$identify');
+      expect(identifyEvents.length).toBe(2);
+    });
+
+    it('should not send $identify event with empty profile', async () => {
+      MostlyGoodMetrics.resetIdentity(); // Clear any previous identify state
+      MostlyGoodMetrics.identify('user_123', {});
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const events = await storage.fetchEvents(10);
+      const identifyEvent = events.find((e) => e.name === '$identify');
+      expect(identifyEvent).toBeUndefined();
+    });
   });
 
   describe('resetIdentity', () => {
