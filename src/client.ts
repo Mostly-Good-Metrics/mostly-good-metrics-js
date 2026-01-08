@@ -94,7 +94,7 @@ export class MostlyGoodMetrics {
     }
 
     // Fetch experiments in background
-    this.fetchExperiments();
+    void this.fetchExperiments();
   }
 
   /**
