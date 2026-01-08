@@ -793,4 +793,259 @@ describe('MostlyGoodMetrics', () => {
       expect(events[0].properties?.$device_type).not.toBe('hacked');
     });
   });
+
+  describe('getVariant', () => {
+    let originalFetch: typeof global.fetch;
+
+    beforeEach(() => {
+      originalFetch = global.fetch;
+    });
+
+    afterEach(() => {
+      global.fetch = originalFetch;
+      MostlyGoodMetrics.reset();
+    });
+
+    it('should return null when SDK not configured', () => {
+      const variant = MostlyGoodMetrics.getVariant('button-color');
+      expect(variant).toBeNull();
+    });
+
+    it('should return null when experiment not found after experiments loaded', async () => {
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ experiments: [] }),
+      });
+
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+      });
+
+      await MostlyGoodMetrics.ready();
+
+      const variant = MostlyGoodMetrics.getVariant('nonexistent-experiment');
+      expect(variant).toBeNull();
+    });
+
+    it('should return null when called before experiments are loaded', async () => {
+      // Never resolve the fetch
+      global.fetch = jest.fn().mockImplementation(() => new Promise(() => {}));
+
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+      });
+
+      // Don't wait for ready - experiments not loaded yet
+      const variant = MostlyGoodMetrics.getVariant('button-color');
+      expect(variant).toBeNull();
+    });
+
+    it('should return variant when experiment exists', async () => {
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            experiments: [{ id: 'button-color', variants: ['a', 'b'] }],
+          }),
+      });
+
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+      });
+
+      await MostlyGoodMetrics.ready();
+
+      const variant = MostlyGoodMetrics.getVariant('button-color');
+      expect(variant).not.toBeNull();
+      expect(['a', 'b']).toContain(variant);
+    });
+
+    it('should be deterministic - same user gets same variant', async () => {
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            experiments: [{ id: 'button-color', variants: ['a', 'b', 'c'] }],
+          }),
+      });
+
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+      });
+
+      await MostlyGoodMetrics.ready();
+
+      // Call multiple times - should return same variant
+      const variant1 = MostlyGoodMetrics.getVariant('button-color');
+      const variant2 = MostlyGoodMetrics.getVariant('button-color');
+      const variant3 = MostlyGoodMetrics.getVariant('button-color');
+
+      expect(variant1).toBe(variant2);
+      expect(variant2).toBe(variant3);
+    });
+
+    it('should store variant as super property', async () => {
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            experiments: [{ id: 'button-color', variants: ['a', 'b'] }],
+          }),
+      });
+
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+      });
+
+      await MostlyGoodMetrics.ready();
+
+      const variant = MostlyGoodMetrics.getVariant('button-color');
+
+      const superProps = MostlyGoodMetrics.getSuperProperties();
+      expect(superProps.experiment_button_color).toBe(variant);
+    });
+
+    it('should attach experiment variant to tracked events', async () => {
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            experiments: [{ id: 'checkout-flow', variants: ['control', 'treatment'] }],
+          }),
+      });
+
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+      });
+
+      await MostlyGoodMetrics.ready();
+
+      const variant = MostlyGoodMetrics.getVariant('checkout-flow');
+      MostlyGoodMetrics.track('purchase_completed');
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const events = await storage.fetchEvents(1);
+      expect(events[0].properties?.experiment_checkout_flow).toBe(variant);
+    });
+
+    it('should handle fetch failure gracefully', async () => {
+      global.fetch = jest.fn().mockRejectedValue(new Error('Network error'));
+
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+      });
+
+      // Should resolve even on fetch failure
+      await MostlyGoodMetrics.ready();
+
+      const variant = MostlyGoodMetrics.getVariant('button-color');
+      expect(variant).toBeNull();
+    });
+
+    it('should handle non-ok response gracefully', async () => {
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: false,
+        status: 500,
+      });
+
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+      });
+
+      await MostlyGoodMetrics.ready();
+
+      const variant = MostlyGoodMetrics.getVariant('button-color');
+      expect(variant).toBeNull();
+    });
+
+    it('should convert experiment name to snake_case for property', async () => {
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            experiments: [{ id: 'newOnboardingFlow', variants: ['a', 'b'] }],
+          }),
+      });
+
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+      });
+
+      await MostlyGoodMetrics.ready();
+
+      MostlyGoodMetrics.getVariant('newOnboardingFlow');
+
+      const superProps = MostlyGoodMetrics.getSuperProperties();
+      expect(superProps.experiment_new_onboarding_flow).toBeDefined();
+    });
+
+    it('should return null for empty experimentName', async () => {
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ experiments: [] }),
+      });
+
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+      });
+
+      await MostlyGoodMetrics.ready();
+
+      const variant = MostlyGoodMetrics.getVariant('');
+      expect(variant).toBeNull();
+    });
+
+    it('should return null for experiment with no variants', async () => {
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            experiments: [{ id: 'empty-experiment', variants: [] }],
+          }),
+      });
+
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+      });
+
+      await MostlyGoodMetrics.ready();
+
+      const variant = MostlyGoodMetrics.getVariant('empty-experiment');
+      expect(variant).toBeNull();
+    });
+  });
 });
