@@ -408,6 +408,28 @@ export interface UserProfile {
 }
 
 /**
+ * An experiment configuration from the server.
+ */
+export interface Experiment {
+  /**
+   * The experiment identifier (e.g., "button-color").
+   */
+  id: string;
+
+  /**
+   * The variants for this experiment (e.g., ["a", "b"]).
+   */
+  variants: string[];
+}
+
+/**
+ * Response from the experiments API endpoint.
+ */
+export interface ExperimentsResponse {
+  experiments: Experiment[];
+}
+
+/**
  * System property keys (prefixed with $).
  */
 export const SystemProperties = {

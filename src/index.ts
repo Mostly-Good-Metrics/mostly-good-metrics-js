@@ -47,6 +47,8 @@ export type {
   IEventStorage,
   INetworkClient,
   UserProfile,
+  Experiment,
+  ExperimentsResponse,
 } from './types';
 
 // Error class

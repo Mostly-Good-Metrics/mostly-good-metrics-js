@@ -3,6 +3,8 @@ import { createDefaultNetworkClient } from './network';
 import { createDefaultStorage, persistence } from './storage';
 import {
   EventProperties,
+  Experiment,
+  ExperimentsResponse,
   IEventStorage,
   INetworkClient,
   MGMConfiguration,
@@ -47,6 +49,12 @@ export class MostlyGoodMetrics {
   private anonymousIdValue: string;
   private lifecycleSetup = false;
 
+  // A/B testing state
+  private experiments: Map<string, Experiment> = new Map();
+  private experimentsLoaded = false;
+  private experimentsReadyResolve: (() => void) | null = null;
+  private experimentsReadyPromise: Promise<void>;
+
   /**
    * Private constructor - use `configure` to create an instance.
    */
@@ -70,6 +78,11 @@ export class MostlyGoodMetrics {
     // Initialize network client
     this.networkClient = this.config.networkClient ?? createDefaultNetworkClient();
 
+    // Initialize experiments ready promise
+    this.experimentsReadyPromise = new Promise((resolve) => {
+      this.experimentsReadyResolve = resolve;
+    });
+
     logger.info(`MostlyGoodMetrics initialized with environment: ${this.config.environment}`);
 
     // Start auto-flush timer
@@ -79,6 +92,9 @@ export class MostlyGoodMetrics {
     if (this.config.trackAppLifecycleEvents) {
       this.setupLifecycleTracking();
     }
+
+    // Fetch experiments in background
+    void this.fetchExperiments();
   }
 
   /**
@@ -211,6 +227,22 @@ export class MostlyGoodMetrics {
    */
   static getSuperProperties(): EventProperties {
     return MostlyGoodMetrics.instance?.getSuperProperties() ?? {};
+  }
+
+  /**
+   * Get the variant for an experiment.
+   * Returns the assigned variant ('a', 'b', etc.) or null if experiment not found.
+   */
+  static getVariant(experimentName: string): string | null {
+    return MostlyGoodMetrics.instance?.getVariant(experimentName) ?? null;
+  }
+
+  /**
+   * Returns a promise that resolves when experiments have been loaded.
+   * Useful for waiting before calling getVariant() to ensure server-side experiments are available.
+   */
+  static ready(): Promise<void> {
+    return MostlyGoodMetrics.instance?.ready() ?? Promise.resolve();
   }
 
   // =====================================================
@@ -480,6 +512,63 @@ export class MostlyGoodMetrics {
   }
 
   /**
+   * Get the variant for an experiment.
+   * Returns the assigned variant ('a', 'b', etc.) or null if experiment not found.
+   *
+   * Assignment is deterministic based on userId + experimentName, so the same
+   * user always gets the same variant for the same experiment.
+   *
+   * The variant is automatically stored as a super property (experiment_{name}: 'variant')
+   * so it's attached to all subsequent events.
+   */
+  getVariant(experimentName: string): string | null {
+    if (!experimentName) {
+      logger.warn('getVariant called with empty experimentName');
+      return null;
+    }
+
+    // Check if we have this experiment cached
+    const experiment = this.experiments.get(experimentName);
+
+    if (!experiment) {
+      if (this.experimentsLoaded) {
+        // Experiments loaded but this one doesn't exist
+        logger.debug(`Experiment not found: ${experimentName}`);
+        return null;
+      }
+      // Experiments not loaded yet - can't assign variant without knowing variants
+      logger.debug(`Experiments not loaded yet, cannot assign variant for: ${experimentName}`);
+      return null;
+    }
+
+    if (!experiment.variants || experiment.variants.length === 0) {
+      logger.warn(`Experiment ${experimentName} has no variants`);
+      return null;
+    }
+
+    // Get the user ID for deterministic assignment
+    const userId = this.userId ?? this.anonymousIdValue;
+
+    // Compute deterministic variant assignment
+    const variant = this.computeVariant(userId, experimentName, experiment.variants);
+
+    // Store as super property so it's attached to all events
+    const propertyName = `experiment_${this.toSnakeCase(experimentName)}`;
+    this.setSuperProperty(propertyName, variant);
+
+    logger.debug(`Assigned variant '${variant}' for experiment '${experimentName}'`);
+    return variant;
+  }
+
+  /**
+   * Returns a promise that resolves when experiments have been loaded.
+   * Useful for waiting before calling getVariant() to ensure server-side experiments are available.
+   */
+  ready(): Promise<void> {
+    return this.experimentsReadyPromise;
+  }
+
+  /**
    * Clean up resources (stop timers, etc.).
    */
   destroy(): void {
@@ -691,5 +780,88 @@ export class MostlyGoodMetrics {
     // We can't use async storage operations here, so we rely on
     // the regular flush mechanism for most events
     logger.debug('Page unloading, attempting beacon flush');
+  }
+
+  // =====================================================
+  // A/B Testing methods
+  // =====================================================
+
+  /**
+   * Fetch experiments from the server.
+   * Called automatically during initialization.
+   */
+  private async fetchExperiments(): Promise<void> {
+    const url = `${this.config.baseURL}/v1/experiments`;
+
+    try {
+      logger.debug('Fetching experiments...');
+
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${this.config.apiKey}`,
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        logger.warn(`Failed to fetch experiments: ${response.status}`);
+        this.markExperimentsReady();
+        return;
+      }
+
+      const data = (await response.json()) as ExperimentsResponse;
+
+      // Cache experiments by ID
+      this.experiments.clear();
+      for (const experiment of data.experiments || []) {
+        this.experiments.set(experiment.id, experiment);
+      }
+
+      logger.debug(`Loaded ${this.experiments.size} experiments`);
+    } catch (e) {
+      logger.warn('Failed to fetch experiments', e);
+    } finally {
+      this.markExperimentsReady();
+    }
+  }
+
+  /**
+   * Mark experiments as loaded and resolve the ready promise.
+   */
+  private markExperimentsReady(): void {
+    this.experimentsLoaded = true;
+    if (this.experimentsReadyResolve) {
+      this.experimentsReadyResolve();
+      this.experimentsReadyResolve = null;
+    }
+  }
+
+  /**
+   * Compute a deterministic variant assignment based on userId and experimentName.
+   * Same user + same experiment = same variant (consistent assignment).
+   */
+  private computeVariant(userId: string, experimentName: string, variants: string[]): string {
+    // Create a deterministic hash from userId + experimentName
+    const hashInput = `${userId}:${experimentName}`;
+    const hash = this.simpleHash(hashInput);
+
+    // Convert hash to a positive number and mod by variant count
+    const hashNum = Math.abs(parseInt(hash, 16));
+    const variantIndex = hashNum % variants.length;
+
+    return variants[variantIndex];
+  }
+
+  /**
+   * Convert a string to snake_case.
+   * Used for experiment property names (e.g., "button-color" -> "button_color").
+   */
+  private toSnakeCase(str: string): string {
+    return str
+      .replace(/([A-Z])/g, '_$1')
+      .replace(/[-\s]+/g, '_')
+      .toLowerCase()
+      .replace(/^_/, '');
   }
 }
