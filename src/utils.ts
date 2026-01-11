@@ -67,7 +67,7 @@ export function getISOTimestamp(): string {
 
 /**
  * Validate an event name.
- * Must match pattern: ^$?[a-zA-Z][a-zA-Z0-9_]*$
+ * Must match pattern: ^$?[a-zA-Z][a-zA-Z0-9_]*( [a-zA-Z0-9_]+)*$
  * Max 255 characters.
  */
 export function isValidEventName(name: string): boolean {
@@ -95,7 +95,7 @@ export function validateEventName(name: string): void {
   if (!EVENT_NAME_REGEX.test(name)) {
     throw new MGMError(
       'INVALID_EVENT_NAME',
-      'Event name must start with a letter (or $ for system events) and contain only alphanumeric characters and underscores'
+      'Event name must start with a letter (or $ for system events) and contain only alphanumeric characters, underscores, and spaces'
     );
   }
 }

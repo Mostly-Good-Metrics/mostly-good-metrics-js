@@ -168,7 +168,7 @@ export type EventPropertyValue =
  */
 export interface MGMEvent {
   /**
-   * The name of the event. Must match pattern: ^$?[a-zA-Z][a-zA-Z0-9_]*$
+   * The name of the event. Must match pattern: ^$?[a-zA-Z][a-zA-Z0-9_]*( [a-zA-Z0-9_]+)*$
    * Max 255 characters.
    */
   name: string;
@@ -470,6 +470,6 @@ export const Constraints = {
 
 /**
  * Regular expression for validating event names.
- * Must start with a letter (or $ for system events) followed by alphanumeric and underscores.
+ * Must start with a letter (or $ for system events) followed by alphanumeric, underscores, or spaces.
  */
-export const EVENT_NAME_REGEX = /^\$?[a-zA-Z][a-zA-Z0-9_]*$/;
+export const EVENT_NAME_REGEX = /^\$?[a-zA-Z][a-zA-Z0-9_]*( [a-zA-Z0-9_]+)*$/;
