@@ -72,6 +72,8 @@ describe('isValidEventName', () => {
     expect(isValidEventName('event123')).toBe(true);
     expect(isValidEventName('a')).toBe(true);
     expect(isValidEventName('ABC_123_xyz')).toBe(true);
+    expect(isValidEventName('Button Clicked')).toBe(true);
+    expect(isValidEventName('User Signed Up')).toBe(true);
   });
 
   it('should accept system event names (starting with $)', () => {
@@ -86,7 +88,6 @@ describe('isValidEventName', () => {
     expect(isValidEventName('_event')).toBe(false); // starts with underscore
     expect(isValidEventName('event-name')).toBe(false); // contains hyphen
     expect(isValidEventName('event.name')).toBe(false); // contains dot
-    expect(isValidEventName('event name')).toBe(false); // contains space
     expect(isValidEventName('event@name')).toBe(false); // contains @
   });
 
@@ -103,6 +104,7 @@ describe('validateEventName', () => {
   it('should not throw for valid event names', () => {
     expect(() => validateEventName('valid_event')).not.toThrow();
     expect(() => validateEventName('$system_event')).not.toThrow();
+    expect(() => validateEventName('Button Clicked')).not.toThrow();
   });
 
   it('should throw MGMError for empty event names', () => {
