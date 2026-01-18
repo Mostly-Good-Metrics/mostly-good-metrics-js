@@ -3,6 +3,7 @@ import { Constraints, EventProperties, IEventStorage, MGMError, MGMEvent } from 
 
 const STORAGE_KEY = 'mostlygoodmetrics_events';
 const USER_ID_KEY = 'mostlygoodmetrics_user_id';
+const ANONYMOUS_ID_KEY = 'mostlygoodmetrics_anonymous_id';
 const APP_VERSION_KEY = 'mostlygoodmetrics_app_version';
 const SUPER_PROPERTIES_KEY = 'mostlygoodmetrics_super_properties';
 
@@ -177,6 +178,7 @@ export function createDefaultStorage(maxEvents: number): IEventStorage {
  */
 class PersistenceManager {
   private inMemoryUserId: string | null = null;
+  private inMemoryAnonymousId: string | null = null;
   private inMemoryAppVersion: string | null = null;
   private inMemorySuperProperties: EventProperties = {};
 
@@ -202,6 +204,51 @@ class PersistenceManager {
       }
     }
     this.inMemoryUserId = userId;
+  }
+
+  /**
+   * Get the anonymous ID (auto-generated UUID).
+   */
+  getAnonymousId(): string | null {
+    if (isLocalStorageAvailable()) {
+      return localStorage.getItem(ANONYMOUS_ID_KEY);
+    }
+    return this.inMemoryAnonymousId;
+  }
+
+  /**
+   * Set the anonymous ID (persists across sessions).
+   */
+  setAnonymousId(anonymousId: string): void {
+    if (isLocalStorageAvailable()) {
+      localStorage.setItem(ANONYMOUS_ID_KEY, anonymousId);
+    }
+    this.inMemoryAnonymousId = anonymousId;
+  }
+
+  /**
+   * Initialize the anonymous ID. If an override is provided, use it.
+   * Otherwise, use existing persisted ID or generate a new one.
+   * @param overrideId Optional ID from wrapper SDK (e.g., React Native device ID)
+   * @param generateId Function to generate an anonymous ID
+   */
+  initializeAnonymousId(overrideId: string | undefined, generateId: () => string): string {
+    // If wrapper SDK provides an override, always use it
+    if (overrideId) {
+      this.setAnonymousId(overrideId);
+      return overrideId;
+    }
+
+    // Check for existing persisted anonymous ID
+    const existingId = this.getAnonymousId();
+    if (existingId) {
+      return existingId;
+    }
+
+    // Generate and persist a new anonymous ID
+    const newId = generateId();
+    this.setAnonymousId(newId);
+    return newId;
   }
 
   /**

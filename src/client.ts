@@ -16,6 +16,7 @@ import {
 import {
   delay,
   detectDeviceType,
+  generateAnonymousId,
   generateUUID,
   getDeviceModel,
   getISOTimestamp,
@@ -42,6 +43,7 @@ export class MostlyGoodMetrics {
   private flushTimer: ReturnType<typeof setInterval> | null = null;
   private isFlushingInternal = false;
   private sessionIdValue: string;
+  private anonymousIdValue: string;
   private lifecycleSetup = false;
 
   /**
@@ -50,6 +52,10 @@ export class MostlyGoodMetrics {
   private constructor(config: MGMConfiguration) {
     this.config = resolveConfiguration(config);
     this.sessionIdValue = generateUUID();
+    this.anonymousIdValue = persistence.initializeAnonymousId(
+      config.anonymousId,
+      generateAnonymousId
+    );
 
     // Set up logging
     setDebugLogging(this.config.enableDebugLogging);
@@ -213,6 +219,13 @@ export class MostlyGoodMetrics {
   }
 
   /**
+   * Get the anonymous ID (auto-generated UUID, persisted across sessions).
+   */
+  get anonymousId(): string {
+    return this.anonymousIdValue;
+  }
+
+  /**
    * Get the current session ID.
    */
   get sessionId(): string {
@@ -265,7 +278,7 @@ export class MostlyGoodMetrics {
       name,
       client_event_id: generateUUID(),
       timestamp: getISOTimestamp(),
-      user_id: this.userId ?? undefined,
+      user_id: this.userId ?? this.anonymousIdValue,
       session_id: this.sessionIdValue,
       platform: this.config.platform,
       app_version: this.config.appVersion || undefined,
@@ -468,7 +481,7 @@ export class MostlyGoodMetrics {
       platform: this.config.platform,
       app_version: this.config.appVersion || undefined,
       os_version: this.config.osVersion || getOSVersion() || undefined,
-      user_id: this.userId ?? undefined,
+      user_id: this.userId ?? this.anonymousIdValue,
       session_id: this.sessionIdValue,
       environment: this.config.environment,
       locale: getLocale(),

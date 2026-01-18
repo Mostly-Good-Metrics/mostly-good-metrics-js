@@ -108,13 +108,19 @@ export interface MGMConfiguration {
    * @param error The error that occurred
    */
   onError?: (error: MGMError) => void;
+
+  /**
+   * Override anonymous ID (for wrapper SDKs like React Native).
+   * If not provided, auto-generated on first launch and persisted.
+   */
+  anonymousId?: string;
 }
 
 /**
  * Internal resolved configuration with all defaults applied.
  */
 export interface ResolvedConfiguration extends Required<
-  Omit<MGMConfiguration, 'storage' | 'networkClient' | 'onError'>
+  Omit<MGMConfiguration, 'storage' | 'networkClient' | 'onError' | 'anonymousId'>
 > {
   storage?: IEventStorage;
   networkClient?: INetworkClient;
