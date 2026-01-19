@@ -4,7 +4,6 @@ import { createDefaultStorage, persistence } from './storage';
 import {
   CachedExperimentVariants,
   EventProperties,
-  Experiment,
   ExperimentsResponse,
   IEventStorage,
   INetworkClient,
@@ -53,7 +52,6 @@ export class MostlyGoodMetrics {
   private lifecycleSetup = false;
 
   // A/B testing state
-  private experiments: Map<string, Experiment> = new Map();
   private assignedVariants: Record<string, string> = {}; // Server-assigned variants
   private experimentsLoaded = false;
   private experimentsReadyResolve: (() => void) | null = null;
@@ -562,14 +560,7 @@ export class MostlyGoodMetrics {
     }
 
     // Experiments loaded but no assignment for this experiment
-    // This could mean the experiment doesn't exist or user wasn't assigned
-    const experiment = this.experiments.get(experimentName);
-    if (!experiment) {
-      logger.debug(`Experiment not found: ${experimentName}`);
-    } else {
-      logger.debug(`No variant assigned for experiment: ${experimentName}`);
-    }
-
+    logger.debug(`No variant assigned for experiment: ${experimentName}`);
     return null;
   }
 
@@ -848,21 +839,13 @@ export class MostlyGoodMetrics {
 
       const data = (await response.json()) as ExperimentsResponse;
 
-      // Cache experiments by ID (for getVariant to check if experiment exists)
-      this.experiments.clear();
-      for (const experiment of data.experiments || []) {
-        this.experiments.set(experiment.id, experiment);
-      }
-
       // Store server-assigned variants
       this.assignedVariants = data.assigned_variants ?? {};
 
       // Cache in localStorage
       this.saveExperimentsCache(currentUserId, this.assignedVariants);
 
-      logger.debug(
-        `Loaded ${this.experiments.size} experiments, ${Object.keys(this.assignedVariants).length} assigned variants`
-      );
+      logger.debug(`Loaded ${Object.keys(this.assignedVariants).length} assigned variants`);
     } catch (e) {
       logger.warn('Failed to fetch experiments', e);
     } finally {

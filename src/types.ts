@@ -423,17 +423,15 @@ export interface Experiment {
 }
 
 /**
- * Response from the experiments API endpoint.
+ * Response from the experiments API endpoint when user_id is provided.
+ * Contains only the assigned variants for the user.
  */
 export interface ExperimentsResponse {
-  experiments: Experiment[];
-
   /**
    * Server-assigned variants for the user.
-   * Only present when user_id is provided in the request.
    * Maps experiment ID to the assigned variant (e.g., {"button-color": "a"}).
    */
-  assigned_variants?: Record<string, string>;
+  assigned_variants: Record<string, string>;
 }
 
 /**
