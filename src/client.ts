@@ -2,8 +2,8 @@ import { logger, setDebugLogging } from './logger';
 import { createDefaultNetworkClient } from './network';
 import { createDefaultStorage, persistence } from './storage';
 import {
+  CachedExperimentVariants,
   EventProperties,
-  Experiment,
   ExperimentsResponse,
   IEventStorage,
   INetworkClient,
@@ -32,6 +32,8 @@ import {
 } from './utils';
 
 const FLUSH_DELAY_MS = 100; // Delay between batch sends
+const EXPERIMENTS_CACHE_KEY = 'mgm_experiment_variants';
+const EXPERIMENTS_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 /**
  * Main client for MostlyGoodMetrics.
@@ -50,7 +52,7 @@ export class MostlyGoodMetrics {
   private lifecycleSetup = false;
 
   // A/B testing state
-  private experiments: Map<string, Experiment> = new Map();
+  private assignedVariants: Record<string, string> = {}; // Server-assigned variants
   private experimentsLoaded = false;
   private experimentsReadyResolve: (() => void) | null = null;
   private experimentsReadyPromise: Promise<void>;
@@ -345,6 +347,9 @@ export class MostlyGoodMetrics {
    * Profile data is sent to the backend via the $identify event.
    * Debouncing: only sends $identify if payload changed or >24h since last send.
    *
+   * This also invalidates the experiment variants cache and refetches experiments
+   * with the new user ID to handle the "identified wins" aliasing strategy.
+   *
    * @param userId The user's unique identifier
    * @param profile Optional profile data (email, name)
    */
@@ -354,6 +359,7 @@ export class MostlyGoodMetrics {
       return;
     }
 
+    const previousUserId = this.userId ?? this.anonymousIdValue;
     logger.debug(`Identifying user: ${userId}`);
     persistence.setUserId(userId);
 
@@ -361,6 +367,14 @@ export class MostlyGoodMetrics {
     // eslint-disable-next-line @typescript-eslint/prefer-nullish-coalescing -- intentional truthy check for non-empty strings
     if (profile && (profile.email || profile.name)) {
       this.sendIdentifyEventIfNeeded(userId, profile);
+    }
+
+    // If user ID changed, invalidate experiment cache and refetch
+    // This handles the "identified wins" aliasing strategy on the server
+    if (previousUserId !== userId) {
+      logger.debug('User identity changed, refetching experiments');
+      this.invalidateExperimentsCache();
+      void this.fetchExperiments();
     }
   }
 
@@ -515,10 +529,10 @@ export class MostlyGoodMetrics {
    * Get the variant for an experiment.
    * Returns the assigned variant ('a', 'b', etc.) or null if experiment not found.
    *
-   * Assignment is deterministic based on userId + experimentName, so the same
-   * user always gets the same variant for the same experiment.
+   * Variants are assigned server-side and cached locally. The server ensures
+   * the same user always gets the same variant for the same experiment.
    *
-   * The variant is automatically stored as a super property (experiment_{name}: 'variant')
+   * The variant is automatically stored as a super property ($experiment_{name}: 'variant')
    * so it's attached to all subsequent events.
    */
   getVariant(experimentName: string): string | null {
@@ -527,37 +541,27 @@ export class MostlyGoodMetrics {
       return null;
     }
 
-    // Check if we have this experiment cached
-    const experiment = this.experiments.get(experimentName);
+    // Check if we have a server-assigned variant for this experiment
+    const variant = this.assignedVariants[experimentName];
 
-    if (!experiment) {
-      if (this.experimentsLoaded) {
-        // Experiments loaded but this one doesn't exist
-        logger.debug(`Experiment not found: ${experimentName}`);
-        return null;
-      }
-      // Experiments not loaded yet - can't assign variant without knowing variants
-      logger.debug(`Experiments not loaded yet, cannot assign variant for: ${experimentName}`);
+    if (variant) {
+      // Store as super property so it's attached to all events
+      const propertyName = `$experiment_${this.toSnakeCase(experimentName)}`;
+      this.setSuperProperty(propertyName, variant);
+
+      logger.debug(`Using server-assigned variant '${variant}' for experiment '${experimentName}'`);
+      return variant;
+    }
+
+    // No assigned variant - check if experiments have been loaded
+    if (!this.experimentsLoaded) {
+      logger.debug(`Experiments not loaded yet, cannot get variant for: ${experimentName}`);
       return null;
     }
 
-    if (!experiment.variants || experiment.variants.length === 0) {
-      logger.warn(`Experiment ${experimentName} has no variants`);
-      return null;
-    }
-
-    // Get the user ID for deterministic assignment
-    const userId = this.userId ?? this.anonymousIdValue;
-
-    // Compute deterministic variant assignment
-    const variant = this.computeVariant(userId, experimentName, experiment.variants);
-
-    // Store as super property so it's attached to all events
-    const propertyName = `experiment_${this.toSnakeCase(experimentName)}`;
-    this.setSuperProperty(propertyName, variant);
-
-    logger.debug(`Assigned variant '${variant}' for experiment '${experimentName}'`);
-    return variant;
+    // Experiments loaded but no assignment for this experiment
+    logger.debug(`No variant assigned for experiment: ${experimentName}`);
+    return null;
   }
 
   /**
@@ -788,10 +792,33 @@ export class MostlyGoodMetrics {
 
   /**
    * Fetch experiments from the server.
-   * Called automatically during initialization.
+   * Called automatically during initialization and after identify().
+   *
+   * Flow:
+   * 1. Check localStorage cache - if valid and same user, use cached variants
+   * 2. Otherwise, fetch from server with user_id
+   * 3. Store response in memory and localStorage cache
    */
   private async fetchExperiments(): Promise<void> {
-    const url = `${this.config.baseURL}/v1/experiments`;
+    const currentUserId = this.userId ?? this.anonymousIdValue;
+
+    // Check localStorage cache first
+    const cached = this.loadExperimentsCache();
+    if (cached && cached.userId === currentUserId) {
+      const cacheAge = Date.now() - cached.fetchedAt;
+      if (cacheAge < EXPERIMENTS_CACHE_TTL_MS) {
+        logger.debug(
+          `Using cached experiment variants (age: ${Math.round(cacheAge / 1000 / 60)}min)`
+        );
+        this.assignedVariants = cached.variants;
+        this.markExperimentsReady();
+        return;
+      }
+      logger.debug('Cached experiment variants expired, fetching fresh');
+    }
+
+    // Build URL with user_id for server-side variant assignment
+    const url = `${this.config.baseURL}/v1/experiments?user_id=${encodeURIComponent(currentUserId)}`;
 
     try {
       logger.debug('Fetching experiments...');
@@ -812,13 +839,13 @@ export class MostlyGoodMetrics {
 
       const data = (await response.json()) as ExperimentsResponse;
 
-      // Cache experiments by ID
-      this.experiments.clear();
-      for (const experiment of data.experiments || []) {
-        this.experiments.set(experiment.id, experiment);
-      }
+      // Store server-assigned variants
+      this.assignedVariants = data.assigned_variants ?? {};
 
-      logger.debug(`Loaded ${this.experiments.size} experiments`);
+      // Cache in localStorage
+      this.saveExperimentsCache(currentUserId, this.assignedVariants);
+
+      logger.debug(`Loaded ${Object.keys(this.assignedVariants).length} assigned variants`);
     } catch (e) {
       logger.warn('Failed to fetch experiments', e);
     } finally {
@@ -838,19 +865,68 @@ export class MostlyGoodMetrics {
   }
 
   /**
-   * Compute a deterministic variant assignment based on userId and experimentName.
-   * Same user + same experiment = same variant (consistent assignment).
+   * Load experiment variants from localStorage cache.
    */
-  private computeVariant(userId: string, experimentName: string, variants: string[]): string {
-    // Create a deterministic hash from userId + experimentName
-    const hashInput = `${userId}:${experimentName}`;
-    const hash = this.simpleHash(hashInput);
+  private loadExperimentsCache(): CachedExperimentVariants | null {
+    if (typeof localStorage === 'undefined') {
+      return null;
+    }
 
-    // Convert hash to a positive number and mod by variant count
-    const hashNum = Math.abs(parseInt(hash, 16));
-    const variantIndex = hashNum % variants.length;
+    try {
+      const cached = localStorage.getItem(EXPERIMENTS_CACHE_KEY);
+      if (!cached) {
+        return null;
+      }
+      return JSON.parse(cached) as CachedExperimentVariants;
+    } catch (e) {
+      logger.debug('Failed to load experiments cache', e);
+      return null;
+    }
+  }
 
-    return variants[variantIndex];
+  /**
+   * Save experiment variants to localStorage cache.
+   */
+  private saveExperimentsCache(userId: string, variants: Record<string, string>): void {
+    if (typeof localStorage === 'undefined') {
+      return;
+    }
+
+    try {
+      const cached: CachedExperimentVariants = {
+        userId,
+        variants,
+        fetchedAt: Date.now(),
+      };
+      localStorage.setItem(EXPERIMENTS_CACHE_KEY, JSON.stringify(cached));
+    } catch (e) {
+      logger.debug('Failed to save experiments cache', e);
+    }
+  }
+
+  /**
+   * Invalidate (clear) the localStorage experiments cache.
+   * Called when user identity changes.
+   */
+  private invalidateExperimentsCache(): void {
+    // Clear in-memory state
+    this.assignedVariants = {};
+    this.experimentsLoaded = false;
+
+    // Reset the ready promise for the new fetch
+    this.experimentsReadyPromise = new Promise((resolve) => {
+      this.experimentsReadyResolve = resolve;
+    });
+
+    // Clear localStorage cache
+    if (typeof localStorage !== 'undefined') {
+      try {
+        localStorage.removeItem(EXPERIMENTS_CACHE_KEY);
+        logger.debug('Invalidated experiments cache');
+      } catch (e) {
+        logger.debug('Failed to invalidate experiments cache', e);
+      }
+    }
   }
 
   /**

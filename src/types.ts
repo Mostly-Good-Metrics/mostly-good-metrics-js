@@ -423,10 +423,35 @@ export interface Experiment {
 }
 
 /**
- * Response from the experiments API endpoint.
+ * Response from the experiments API endpoint when user_id is provided.
+ * Contains only the assigned variants for the user.
  */
 export interface ExperimentsResponse {
-  experiments: Experiment[];
+  /**
+   * Server-assigned variants for the user.
+   * Maps experiment ID to the assigned variant (e.g., {"button-color": "a"}).
+   */
+  assigned_variants: Record<string, string>;
+}
+
+/**
+ * Cached experiment variants stored in localStorage.
+ */
+export interface CachedExperimentVariants {
+  /**
+   * The user ID these variants are assigned to.
+   */
+  userId: string;
+
+  /**
+   * Map of experiment ID to assigned variant.
+   */
+  variants: Record<string, string>;
+
+  /**
+   * Timestamp when the cache was created (ms since epoch).
+   */
+  fetchedAt: number;
 }
 
 /**
