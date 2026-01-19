@@ -799,11 +799,19 @@ describe('MostlyGoodMetrics', () => {
 
     beforeEach(() => {
       originalFetch = global.fetch;
+      // Clear localStorage cache for experiments between tests
+      if (typeof localStorage !== 'undefined') {
+        localStorage.removeItem('mgm_experiment_variants');
+      }
     });
 
     afterEach(() => {
       global.fetch = originalFetch;
       MostlyGoodMetrics.reset();
+      // Also clear after to ensure clean state
+      if (typeof localStorage !== 'undefined') {
+        localStorage.removeItem('mgm_experiment_variants');
+      }
     });
 
     it('should return null when SDK not configured', () => {
@@ -852,6 +860,7 @@ describe('MostlyGoodMetrics', () => {
         json: () =>
           Promise.resolve({
             experiments: [{ id: 'button-color', variants: ['a', 'b'] }],
+            assigned_variants: { 'button-color': 'a' },
           }),
       });
 
@@ -865,8 +874,7 @@ describe('MostlyGoodMetrics', () => {
       await MostlyGoodMetrics.ready();
 
       const variant = MostlyGoodMetrics.getVariant('button-color');
-      expect(variant).not.toBeNull();
-      expect(['a', 'b']).toContain(variant);
+      expect(variant).toBe('a');
     });
 
     it('should be deterministic - same user gets same variant', async () => {
@@ -875,6 +883,7 @@ describe('MostlyGoodMetrics', () => {
         json: () =>
           Promise.resolve({
             experiments: [{ id: 'button-color', variants: ['a', 'b', 'c'] }],
+            assigned_variants: { 'button-color': 'b' },
           }),
       });
 
@@ -887,11 +896,12 @@ describe('MostlyGoodMetrics', () => {
 
       await MostlyGoodMetrics.ready();
 
-      // Call multiple times - should return same variant
+      // Call multiple times - should return same server-assigned variant
       const variant1 = MostlyGoodMetrics.getVariant('button-color');
       const variant2 = MostlyGoodMetrics.getVariant('button-color');
       const variant3 = MostlyGoodMetrics.getVariant('button-color');
 
+      expect(variant1).toBe('b');
       expect(variant1).toBe(variant2);
       expect(variant2).toBe(variant3);
     });
@@ -902,6 +912,7 @@ describe('MostlyGoodMetrics', () => {
         json: () =>
           Promise.resolve({
             experiments: [{ id: 'button-color', variants: ['a', 'b'] }],
+            assigned_variants: { 'button-color': 'a' },
           }),
       });
 
@@ -917,7 +928,7 @@ describe('MostlyGoodMetrics', () => {
       const variant = MostlyGoodMetrics.getVariant('button-color');
 
       const superProps = MostlyGoodMetrics.getSuperProperties();
-      expect(superProps.experiment_button_color).toBe(variant);
+      expect(superProps.$experiment_button_color).toBe(variant);
     });
 
     it('should attach experiment variant to tracked events', async () => {
@@ -926,6 +937,7 @@ describe('MostlyGoodMetrics', () => {
         json: () =>
           Promise.resolve({
             experiments: [{ id: 'checkout-flow', variants: ['control', 'treatment'] }],
+            assigned_variants: { 'checkout-flow': 'treatment' },
           }),
       });
 
@@ -944,7 +956,7 @@ describe('MostlyGoodMetrics', () => {
       await new Promise((resolve) => setTimeout(resolve, 10));
 
       const events = await storage.fetchEvents(1);
-      expect(events[0].properties?.experiment_checkout_flow).toBe(variant);
+      expect(events[0].properties?.$experiment_checkout_flow).toBe(variant);
     });
 
     it('should handle fetch failure gracefully', async () => {
@@ -989,6 +1001,7 @@ describe('MostlyGoodMetrics', () => {
         json: () =>
           Promise.resolve({
             experiments: [{ id: 'newOnboardingFlow', variants: ['a', 'b'] }],
+            assigned_variants: { newOnboardingFlow: 'b' },
           }),
       });
 
@@ -1004,7 +1017,7 @@ describe('MostlyGoodMetrics', () => {
       MostlyGoodMetrics.getVariant('newOnboardingFlow');
 
       const superProps = MostlyGoodMetrics.getSuperProperties();
-      expect(superProps.experiment_new_onboarding_flow).toBeDefined();
+      expect(superProps.$experiment_new_onboarding_flow).toBeDefined();
     });
 
     it('should return null for empty experimentName', async () => {
@@ -1046,6 +1059,143 @@ describe('MostlyGoodMetrics', () => {
 
       const variant = MostlyGoodMetrics.getVariant('empty-experiment');
       expect(variant).toBeNull();
+    });
+
+    it('should use localStorage cache on subsequent loads', async () => {
+      // First call - fetches from server
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            experiments: [{ id: 'cached-exp', variants: ['a', 'b'] }],
+            assigned_variants: { 'cached-exp': 'a' },
+          }),
+      });
+
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+      });
+
+      await MostlyGoodMetrics.ready();
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+
+      const variant1 = MostlyGoodMetrics.getVariant('cached-exp');
+      expect(variant1).toBe('a');
+
+      // Reset and reconfigure - should use cache
+      MostlyGoodMetrics.reset();
+
+      // Change the mock to return different variant (shouldn't be used due to cache)
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            experiments: [{ id: 'cached-exp', variants: ['a', 'b'] }],
+            assigned_variants: { 'cached-exp': 'b' },
+          }),
+      });
+
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+      });
+
+      await MostlyGoodMetrics.ready();
+
+      // Should still be 'a' from cache, not 'b' from new fetch
+      const variant2 = MostlyGoodMetrics.getVariant('cached-exp');
+      expect(variant2).toBe('a');
+
+      // Fetch should not have been called again (cached)
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    it('should refetch experiments when identify() changes user', async () => {
+      // Clear localStorage first
+      localStorage.removeItem('mgm_experiment_variants');
+
+      // Initial fetch for anonymous user
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            experiments: [{ id: 'user-exp', variants: ['anon', 'identified'] }],
+            assigned_variants: { 'user-exp': 'anon' },
+          }),
+      });
+
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+      });
+
+      await MostlyGoodMetrics.ready();
+      expect(MostlyGoodMetrics.getVariant('user-exp')).toBe('anon');
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+
+      // Now identify - should trigger refetch with new user ID
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            experiments: [{ id: 'user-exp', variants: ['anon', 'identified'] }],
+            assigned_variants: { 'user-exp': 'identified' },
+          }),
+      });
+
+      MostlyGoodMetrics.identify('real_user_123');
+
+      // Wait for refetch
+      await MostlyGoodMetrics.ready();
+
+      // Should now have the identified user's variant
+      expect(MostlyGoodMetrics.getVariant('user-exp')).toBe('identified');
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+
+      // Verify the fetch included user_id
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining('user_id=real_user_123'),
+        expect.any(Object)
+      );
+    });
+
+    it('should not refetch experiments if identify() called with same user', async () => {
+      localStorage.removeItem('mgm_experiment_variants');
+
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            experiments: [{ id: 'same-user-exp', variants: ['a', 'b'] }],
+            assigned_variants: { 'same-user-exp': 'a' },
+          }),
+      });
+
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+      });
+
+      // First identify
+      MostlyGoodMetrics.identify('same_user');
+      await MostlyGoodMetrics.ready();
+
+      const callCount = (global.fetch as jest.Mock).mock.calls.length;
+
+      // Identify again with same user
+      MostlyGoodMetrics.identify('same_user');
+
+      // Should not trigger another fetch
+      expect(global.fetch).toHaveBeenCalledTimes(callCount);
     });
   });
 });
