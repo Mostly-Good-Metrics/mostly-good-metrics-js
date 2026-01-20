@@ -145,6 +145,62 @@ describe('MostlyGoodMetrics', () => {
       expect(events[0].platform).toBeDefined();
     });
 
+    it('should include session_id in events', async () => {
+      MostlyGoodMetrics.track('test_event');
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const events = await storage.fetchEvents(1);
+      expect(events[0].session_id).toBeDefined();
+      // session_id should be a UUID
+      expect(events[0].session_id).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+      );
+    });
+
+    it('should include app_version when configured', async () => {
+      MostlyGoodMetrics.reset();
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+        appVersion: '1.2.3',
+      });
+
+      MostlyGoodMetrics.track('test_event');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const events = await storage.fetchEvents(1);
+      expect(events[0].app_version).toBe('1.2.3');
+    });
+
+    it('should not include app_version when not configured', async () => {
+      MostlyGoodMetrics.track('test_event');
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const events = await storage.fetchEvents(1);
+      expect(events[0].app_version).toBeUndefined();
+    });
+
+    it('should include os_version in events', async () => {
+      MostlyGoodMetrics.reset();
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+        osVersion: '14.0',
+      });
+
+      MostlyGoodMetrics.track('test_event');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const events = await storage.fetchEvents(1);
+      expect(events[0].os_version).toBe('14.0');
+    });
+
     it('should include client_event_id as a UUID', async () => {
       MostlyGoodMetrics.track('test_event');
 
@@ -475,6 +531,34 @@ describe('MostlyGoodMetrics', () => {
 
       expect(networkClient.sentPayloads).toHaveLength(1);
       expect(networkClient.sentPayloads[0].events).toHaveLength(2);
+    });
+
+    it('should include context with snake_case fields in payload', async () => {
+      MostlyGoodMetrics.reset();
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+        appVersion: '2.0.0',
+        osVersion: '15.0',
+      });
+
+      MostlyGoodMetrics.identify('user_123');
+      MostlyGoodMetrics.track('test_event');
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await MostlyGoodMetrics.flush();
+
+      const payload = networkClient.sentPayloads[0];
+      expect(payload.context).toBeDefined();
+      expect(payload.context.session_id).toBeDefined();
+      expect(payload.context.session_id).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+      );
+      expect(payload.context.app_version).toBe('2.0.0');
+      expect(payload.context.os_version).toBe('15.0');
+      expect(payload.context.user_id).toBe('user_123');
     });
 
     it('should clear events after successful send', async () => {
