@@ -61,22 +61,6 @@ That's it! Events are automatically batched and sent.
 
 ## Configuration Options
 
-For more control, pass additional configuration:
-
-```typescript
-MostlyGoodMetrics.configure({
-  apiKey: 'mgm_proj_your_api_key',
-  baseURL: 'https://mostlygoodmetrics.com',
-  environment: 'production',
-  appVersion: '1.0.0',
-  maxBatchSize: 100,
-  flushInterval: 30,
-  maxStoredEvents: 10000,
-  enableDebugLogging: process.env.NODE_ENV === 'development',
-  trackAppLifecycleEvents: false,
-});
-```
-
 | Option | Default | Description |
 |--------|---------|-------------|
 | `apiKey` | - | **Required.** Your API key |
@@ -88,12 +72,6 @@ MostlyGoodMetrics.configure({
 | `maxStoredEvents` | `10000` | Max cached events |
 | `enableDebugLogging` | `false` | Enable console output |
 | `trackAppLifecycleEvents` | `false` | Auto-track lifecycle events ($app_opened, etc.) |
-| `bundleId` | auto-detected | Custom bundle identifier |
-| `cookieDomain` | - | Cookie domain for cross-subdomain tracking (e.g., `.example.com`) |
-| `disableCookies` | `false` | Disable cookies, use only localStorage |
-| `anonymousId` | auto-generated | Override anonymous ID (for wrapper SDKs like React Native) |
-| `storage` | auto-detected | Custom storage adapter |
-| `networkClient` | fetch-based | Custom network client |
 
 ## Automatic Events
 
@@ -108,20 +86,15 @@ When `trackAppLifecycleEvents` is enabled, the SDK automatically tracks:
 
 > **Note:** Install and update detection require `appVersion` to be configured.
 
-## Automatic Properties
+## Automatic Context
 
-The SDK automatically includes these properties with every event:
+The SDK automatically includes these fields with every event:
 
-| Property | Description | Example |
-|----------|-------------|---------|
+| Field | Description | Example |
+|-------|-------------|---------|
 | `$device_type` | Device type | `desktop`, `phone`, `tablet` |
 | `$device_model` | Browser name and version | `Chrome 120.0` |
 | `$sdk` | SDK identifier | `javascript` |
-
-Additionally, these context fields are included with every batch:
-
-| Context Field | Description | Example |
-|---------------|-------------|---------|
 | `platform` | Runtime platform | `web`, `node` |
 | `os_version` | Operating system and version | `macOS 14.2`, `Windows 10` |
 | `app_version` | App version (if configured) | `1.0.0` |
@@ -133,20 +106,22 @@ Additionally, these context fields are included with every batch:
 ## Event Naming
 
 Event names must:
-- Start with a letter (or `$` for system events)
-- Contain only alphanumeric characters and underscores
-- Be 255 characters or less
+1. Start with a letter (a-z, A-Z)
+2. Contain only alphanumeric characters and underscores
+3. Be 255 characters or less
+
+> **Note:** System events use the `$` prefix (e.g., `$app_opened`). User-defined events should not start with `$`.
 
 ```typescript
 // Valid
-MostlyGoodMetrics.track('button_clicked');
-MostlyGoodMetrics.track('PurchaseCompleted');
-MostlyGoodMetrics.track('step_1_completed');
+MostlyGoodMetrics.track('button_clicked');      // lowercase with underscore
+MostlyGoodMetrics.track('PurchaseCompleted');   // camelCase
+MostlyGoodMetrics.track('step_1_completed');    // numbers allowed after first char
 
-// Invalid (will be ignored)
-MostlyGoodMetrics.track('123_event');      // starts with number
-MostlyGoodMetrics.track('event-name');     // contains hyphen
-MostlyGoodMetrics.track('event name');     // contains space
+// Invalid (will be rejected)
+MostlyGoodMetrics.track('123_event');           // starts with number
+MostlyGoodMetrics.track('event-name');          // contains hyphen
+MostlyGoodMetrics.track('event name');          // contains space
 ```
 
 ## Properties
@@ -174,12 +149,14 @@ MostlyGoodMetrics.track('checkout', {
 
 ## User Identification
 
-The SDK automatically generates and persists an anonymous `user_id` (UUID) for each user. This ID:
-- Is auto-generated on first visit
-- Persists across sessions (stored in cookies and localStorage)
-- Is included in every event as `user_id`
+### Anonymous ID
 
-When you call `identify()`, the identified user ID takes precedence over the anonymous ID.
+The SDK automatically generates and persists an anonymous `user_id` (UUID) for each user:
+- Auto-generated on first visit
+- Persists across sessions (stored in cookies and localStorage)
+- Included in every event as `user_id`
+
+When you call `identify()`, the identified user ID takes precedence over the anonymous ID:
 
 ```typescript
 // Before identify(): user_id = "550e8400-e29b-41d4-a716-446655440000" (auto-generated)
@@ -203,7 +180,7 @@ MostlyGoodMetrics.configure({
 
 This allows tracking the same user across `app.yourdomain.com`, `www.yourdomain.com`, etc.
 
-### Privacy Mode (No Cookies)
+### Privacy Mode
 
 For GDPR compliance or privacy-focused applications, you can disable cookies entirely:
 
@@ -262,6 +239,19 @@ Output example:
 [MostlyGoodMetrics] [DEBUG] Starting flush
 [MostlyGoodMetrics] [DEBUG] Successfully sent 5 events
 ```
+
+## Advanced Configuration
+
+The SDK supports additional platform-specific configuration options:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `bundleId` | auto-detected | Custom bundle identifier |
+| `cookieDomain` | - | Cookie domain for cross-subdomain tracking (e.g., `.example.com`) |
+| `disableCookies` | `false` | Disable cookies, use only localStorage |
+| `anonymousId` | auto-generated | Override anonymous ID (for wrapper SDKs like React Native) |
+| `storage` | auto-detected | Custom storage adapter |
+| `networkClient` | fetch-based | Custom network client |
 
 ## Custom Storage
 
