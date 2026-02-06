@@ -59,48 +59,6 @@ MostlyGoodMetrics.resetIdentity();
 
 That's it! Events are automatically batched and sent.
 
-## User Identification
-
-The SDK automatically generates and persists an anonymous `user_id` (UUID) for each user. This ID:
-- Is auto-generated on first visit
-- Persists across sessions (stored in cookies and localStorage)
-- Is included in every event as `user_id`
-
-When you call `identify()`, the identified user ID takes precedence over the anonymous ID.
-
-```typescript
-// Before identify(): user_id = "550e8400-e29b-41d4-a716-446655440000" (auto-generated)
-MostlyGoodMetrics.identify('user_123');
-// After identify(): user_id = "user_123"
-
-MostlyGoodMetrics.resetIdentity();
-// After reset: user_id = "550e8400-e29b-41d4-a716-446655440000" (back to anonymous)
-```
-
-### Cross-Subdomain Tracking
-
-By default, the anonymous ID is stored in cookies (with localStorage fallback). To share the anonymous ID across subdomains:
-
-```typescript
-MostlyGoodMetrics.configure({
-  apiKey: 'mgm_proj_your_api_key',
-  cookieDomain: '.yourdomain.com', // Share across all subdomains
-});
-```
-
-This allows tracking the same user across `app.yourdomain.com`, `www.yourdomain.com`, etc.
-
-### Privacy Mode (No Cookies)
-
-For GDPR compliance or privacy-focused applications, you can disable cookies entirely:
-
-```typescript
-MostlyGoodMetrics.configure({
-  apiKey: 'mgm_proj_your_api_key',
-  disableCookies: true, // Only use localStorage
-});
-```
-
 ## Configuration Options
 
 For more control, pass additional configuration:
@@ -115,7 +73,7 @@ MostlyGoodMetrics.configure({
   flushInterval: 30,
   maxStoredEvents: 10000,
   enableDebugLogging: process.env.NODE_ENV === 'development',
-  trackAppLifecycleEvents: true,
+  trackAppLifecycleEvents: false,
 });
 ```
 
@@ -154,12 +112,23 @@ When `trackAppLifecycleEvents` is enabled, the SDK automatically tracks:
 
 The SDK automatically includes these properties with every event:
 
-| Property | Description |
-|----------|-------------|
-| `$device_type` | Device type (`desktop`, `phone`, `tablet`) |
-| `$device_model` | Browser name and version |
+| Property | Description | Example |
+|----------|-------------|---------|
+| `$device_type` | Device type | `desktop`, `phone`, `tablet` |
+| `$device_model` | Browser name and version | `Chrome 120.0` |
+| `$sdk` | SDK identifier | `javascript` |
 
-Additionally, `osVersion` and `appVersion` (if configured) are included at the event level.
+Additionally, these context fields are included with every batch:
+
+| Context Field | Description | Example |
+|---------------|-------------|---------|
+| `platform` | Runtime platform | `web`, `node` |
+| `os_version` | Operating system and version | `macOS 14.2`, `Windows 10` |
+| `app_version` | App version (if configured) | `1.0.0` |
+| `environment` | Environment name | `production` |
+| `locale` | User's locale | `en-US` |
+| `timezone` | User's timezone | `America/New_York` |
+| `session_id` | Session identifier (per page load) | UUID |
 
 ## Event Naming
 
@@ -203,6 +172,48 @@ MostlyGoodMetrics.track('checkout', {
 - Nesting depth: max 3 levels
 - Total properties size: max 10KB
 
+## User Identification
+
+The SDK automatically generates and persists an anonymous `user_id` (UUID) for each user. This ID:
+- Is auto-generated on first visit
+- Persists across sessions (stored in cookies and localStorage)
+- Is included in every event as `user_id`
+
+When you call `identify()`, the identified user ID takes precedence over the anonymous ID.
+
+```typescript
+// Before identify(): user_id = "550e8400-e29b-41d4-a716-446655440000" (auto-generated)
+MostlyGoodMetrics.identify('user_123');
+// After identify(): user_id = "user_123"
+
+MostlyGoodMetrics.resetIdentity();
+// After reset: user_id = "550e8400-e29b-41d4-a716-446655440000" (back to anonymous)
+```
+
+### Cross-Subdomain Tracking
+
+By default, the anonymous ID is stored in cookies (with localStorage fallback). To share the anonymous ID across subdomains:
+
+```typescript
+MostlyGoodMetrics.configure({
+  apiKey: 'mgm_proj_your_api_key',
+  cookieDomain: '.yourdomain.com', // Share across all subdomains
+});
+```
+
+This allows tracking the same user across `app.yourdomain.com`, `www.yourdomain.com`, etc.
+
+### Privacy Mode (No Cookies)
+
+For GDPR compliance or privacy-focused applications, you can disable cookies entirely:
+
+```typescript
+MostlyGoodMetrics.configure({
+  apiKey: 'mgm_proj_your_api_key',
+  disableCookies: true, // Only use localStorage
+});
+```
+
 ## Manual Flush
 
 Events are automatically flushed periodically and when the page is hidden. You can also trigger a manual flush:
@@ -222,16 +233,16 @@ console.log(`${count} events pending`);
 
 The SDK automatically:
 
-- **Generates anonymous user ID** (UUID, persisted in cookies + localStorage)
-- **Persists events** to localStorage (with in-memory fallback)
-- **Batches events** for efficient network usage
-- **Flushes on interval** (default: every 30 seconds)
-- **Flushes on visibility change** when the tab is hidden
-- **Compresses payloads** using gzip for large batches (>1KB)
-- **Retries on failure** for network errors (events are preserved)
-- **Handles rate limiting** with exponential backoff
-- **Persists identified user ID** across page loads
-- **Generates session IDs** per page load
+- **Generates** anonymous user ID (UUID, persisted in cookies + localStorage)
+- **Persists** events to localStorage (with in-memory fallback)
+- **Batches** events for efficient network usage
+- **Flushes** on interval (default: every 30 seconds)
+- **Flushes** on visibility change when the tab is hidden
+- **Compresses** payloads using gzip for large batches (>1KB)
+- **Retries** on failure for network errors (events are preserved)
+- **Handles** rate limiting with exponential backoff
+- **Persists** identified user ID across page loads
+- **Generates** session IDs per page load
 
 ## Debug Logging
 
@@ -254,7 +265,7 @@ Output example:
 
 ## Custom Storage
 
-You can provide a custom storage adapter for environments where localStorage isn't available:
+You can provide a custom storage adapter for environments where localStorage isn't available. The SDK exports `IEventStorage` interface and `InMemoryEventStorage` for this purpose:
 
 ```typescript
 import { MostlyGoodMetrics, IEventStorage, InMemoryEventStorage } from '@mostly-good-metrics/javascript';
