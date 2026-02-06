@@ -59,48 +59,6 @@ MostlyGoodMetrics.resetIdentity();
 
 That's it! Events are automatically batched and sent.
 
-## User Identification
-
-The SDK automatically generates and persists an anonymous `user_id` (UUID) for each user. This ID:
-- Is auto-generated on first visit
-- Persists across sessions (stored in cookies and localStorage)
-- Is included in every event as `user_id`
-
-When you call `identify()`, the identified user ID takes precedence over the anonymous ID.
-
-```typescript
-// Before identify(): user_id = "550e8400-e29b-41d4-a716-446655440000" (auto-generated)
-MostlyGoodMetrics.identify('user_123');
-// After identify(): user_id = "user_123"
-
-MostlyGoodMetrics.resetIdentity();
-// After reset: user_id = "550e8400-e29b-41d4-a716-446655440000" (back to anonymous)
-```
-
-### Cross-Subdomain Tracking
-
-By default, the anonymous ID is stored in cookies (with localStorage fallback). To share the anonymous ID across subdomains:
-
-```typescript
-MostlyGoodMetrics.configure({
-  apiKey: 'mgm_proj_your_api_key',
-  cookieDomain: '.yourdomain.com', // Share across all subdomains
-});
-```
-
-This allows tracking the same user across `app.yourdomain.com`, `www.yourdomain.com`, etc.
-
-### Privacy Mode (No Cookies)
-
-For GDPR compliance or privacy-focused applications, you can disable cookies entirely:
-
-```typescript
-MostlyGoodMetrics.configure({
-  apiKey: 'mgm_proj_your_api_key',
-  disableCookies: true, // Only use localStorage
-});
-```
-
 ## Configuration Options
 
 For more control, pass additional configuration:
@@ -203,6 +161,48 @@ MostlyGoodMetrics.track('checkout', {
 - Nesting depth: max 3 levels
 - Total properties size: max 10KB
 
+## User Identification
+
+The SDK automatically generates and persists an anonymous `user_id` (UUID) for each user. This ID:
+- Is auto-generated on first visit
+- Persists across sessions (stored in cookies and localStorage)
+- Is included in every event as `user_id`
+
+When you call `identify()`, the identified user ID takes precedence over the anonymous ID.
+
+```typescript
+// Before identify(): user_id = "550e8400-e29b-41d4-a716-446655440000" (auto-generated)
+MostlyGoodMetrics.identify('user_123');
+// After identify(): user_id = "user_123"
+
+MostlyGoodMetrics.resetIdentity();
+// After reset: user_id = "550e8400-e29b-41d4-a716-446655440000" (back to anonymous)
+```
+
+### Cross-Subdomain Tracking
+
+By default, the anonymous ID is stored in cookies (with localStorage fallback). To share the anonymous ID across subdomains:
+
+```typescript
+MostlyGoodMetrics.configure({
+  apiKey: 'mgm_proj_your_api_key',
+  cookieDomain: '.yourdomain.com', // Share across all subdomains
+});
+```
+
+This allows tracking the same user across `app.yourdomain.com`, `www.yourdomain.com`, etc.
+
+### Privacy Mode (No Cookies)
+
+For GDPR compliance or privacy-focused applications, you can disable cookies entirely:
+
+```typescript
+MostlyGoodMetrics.configure({
+  apiKey: 'mgm_proj_your_api_key',
+  disableCookies: true, // Only use localStorage
+});
+```
+
 ## Manual Flush
 
 Events are automatically flushed periodically and when the page is hidden. You can also trigger a manual flush:
@@ -252,7 +252,9 @@ Output example:
 [MostlyGoodMetrics] [DEBUG] Successfully sent 5 events
 ```
 
-## Custom Storage
+## JavaScript-Specific Features
+
+### Custom Storage
 
 You can provide a custom storage adapter for environments where localStorage isn't available:
 
@@ -275,9 +277,9 @@ class MyCustomStorage implements IEventStorage {
 }
 ```
 
-## Framework Integration
+### Framework Integration
 
-### React
+#### React
 
 ```typescript
 // src/analytics.ts
@@ -296,7 +298,7 @@ import { initAnalytics } from './analytics';
 initAnalytics();
 ```
 
-### Next.js
+#### Next.js
 
 ```typescript
 // lib/analytics.ts
@@ -325,7 +327,7 @@ export default function RootLayout({ children }) {
 }
 ```
 
-### Vue
+#### Vue
 
 ```typescript
 // src/plugins/analytics.ts
@@ -345,7 +347,7 @@ import analytics from './plugins/analytics';
 app.use(analytics);
 ```
 
-## TypeScript Support
+### TypeScript Support
 
 Full TypeScript support with exported types:
 
