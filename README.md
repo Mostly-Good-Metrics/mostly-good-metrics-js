@@ -108,7 +108,7 @@ For more control, pass additional configuration:
 ```typescript
 MostlyGoodMetrics.configure({
   apiKey: 'mgm_proj_your_api_key',
-  baseURL: 'https://mostlygoodmetrics.com',
+  baseURL: 'https://ingest.mostlygoodmetrics.com',
   environment: 'production',
   appVersion: '1.0.0',
   maxBatchSize: 100,
@@ -122,7 +122,7 @@ MostlyGoodMetrics.configure({
 | Option | Default | Description |
 |--------|---------|-------------|
 | `apiKey` | - | **Required.** Your API key |
-| `baseURL` | `https://mostlygoodmetrics.com` | API endpoint |
+| `baseURL` | `https://ingest.mostlygoodmetrics.com` | API endpoint |
 | `environment` | `"production"` | Environment name |
 | `appVersion` | - | App version string (required for install/update tracking) |
 | `maxBatchSize` | `100` | Events per batch (1-1000) |
@@ -130,12 +130,14 @@ MostlyGoodMetrics.configure({
 | `maxStoredEvents` | `10000` | Max cached events |
 | `enableDebugLogging` | `false` | Enable console output |
 | `trackAppLifecycleEvents` | `false` | Auto-track lifecycle events ($app_opened, etc.) |
-| `bundleId` | auto-detected | Custom bundle identifier |
-| `cookieDomain` | - | Cookie domain for cross-subdomain tracking (e.g., `.example.com`) |
-| `disableCookies` | `false` | Disable cookies, use only localStorage |
-| `anonymousId` | auto-generated | Override anonymous ID (for wrapper SDKs like React Native) |
-| `storage` | auto-detected | Custom storage adapter |
-| `networkClient` | fetch-based | Custom network client |
+| `bundleId`* | auto-detected | Custom bundle identifier |
+| `cookieDomain`* | - | Cookie domain for cross-subdomain tracking (e.g., `.example.com`) |
+| `disableCookies`* | `false` | Disable cookies, use only localStorage |
+| `anonymousId`* | auto-generated | Override anonymous ID (for wrapper SDKs like React Native) |
+| `storage`* | auto-detected | Custom storage adapter (see [Custom Storage](#custom-storage)) |
+| `networkClient`* | fetch-based | Custom network client |
+
+*JavaScript SDK-specific options not available in other platform SDKs.
 
 ## Automatic Events
 
@@ -257,7 +259,7 @@ Output example:
 You can provide a custom storage adapter for environments where localStorage isn't available:
 
 ```typescript
-import { MostlyGoodMetrics, IEventStorage, InMemoryEventStorage } from '@mostly-good-metrics/javascript';
+import { MostlyGoodMetrics, IEventStorage, InMemoryEventStorage, MGMEvent } from '@mostly-good-metrics/javascript';
 
 // Use in-memory storage
 MostlyGoodMetrics.configure({
@@ -351,12 +353,25 @@ Full TypeScript support with exported types:
 
 ```typescript
 import {
+  // Main client
   MostlyGoodMetrics,
+
+  // Configuration and event types
   MGMConfiguration,
   MGMEvent,
   EventProperties,
+  UserProfile,
+
+  // For custom implementations
   IEventStorage,
   INetworkClient,
+
+  // Storage implementations
+  InMemoryEventStorage,
+
+  // Error handling
+  MGMError,
+  MGMErrorType,
 } from '@mostly-good-metrics/javascript';
 ```
 
