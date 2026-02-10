@@ -2,6 +2,26 @@
 
 A lightweight JavaScript/TypeScript SDK for tracking analytics events with [MostlyGoodMetrics](https://mostlygoodmetrics.com).
 
+## Table of Contents
+
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [User Identification](#user-identification)
+- [Configuration Options](#configuration-options)
+- [Automatic Events](#automatic-events)
+- [Automatic Properties](#automatic-properties)
+- [Automatic Context](#automatic-context)
+- [Event Naming](#event-naming)
+- [Properties](#properties)
+- [Manual Flush](#manual-flush)
+- [Automatic Behavior](#automatic-behavior)
+- [Debug Logging](#debug-logging)
+- [Custom Storage](#custom-storage)
+- [Framework Integration](#framework-integration)
+- [TypeScript Support](#typescript-support)
+- [License](#license)
+
 ## Requirements
 
 - Node.js 16+ (for build tools)
@@ -161,12 +181,33 @@ The SDK automatically includes these properties with every event:
 
 Additionally, `osVersion` and `appVersion` (if configured) are included at the event level.
 
+## Automatic Context
+
+The SDK automatically includes context with every event. You don't need to manually add these fields.
+
+### Event-Level Fields
+
+| Field | Description | Example |
+|-------|-------------|---------|
+| `client_event_id` | Unique UUID for each event (for deduplication) | `550e8400-e29b-41d4-a716-446655440000` |
+| `timestamp` | ISO 8601 event time | `2024-01-15T10:30:00.000Z` |
+| `user_id` | Identified user ID, or anonymous UUID if not identified | `user_123` or `550e8400-e29b-41d4-a716-446655440000` |
+| `session_id` | UUID generated per page load (new session on each load) | `abc123-def456` |
+| `platform` | Platform identifier | `web` |
+| `environment` | Environment name (configured via options) | `production`, `development` |
+| `locale` | User's locale | `en-US` |
+| `timezone` | User's timezone | `America/New_York` |
+| `osVersion` | Browser/OS version (if available) | `10.15.7` |
+| `appVersion` | App version (if configured) | `1.2.0` |
+
 ## Event Naming
 
 Event names must:
 - Start with a letter (or `$` for system events)
 - Contain only alphanumeric characters and underscores
 - Be 255 characters or less
+
+**Reserved `$` prefix:** The `$` prefix is reserved for system events (like `$app_opened`, `$app_installed`). Do not use `$` for custom event names.
 
 ```typescript
 // Valid
@@ -178,6 +219,7 @@ MostlyGoodMetrics.track('step_1_completed');
 MostlyGoodMetrics.track('123_event');      // starts with number
 MostlyGoodMetrics.track('event-name');     // contains hyphen
 MostlyGoodMetrics.track('event name');     // contains space
+MostlyGoodMetrics.track('$custom_event');  // $ prefix is reserved
 ```
 
 ## Properties
@@ -220,18 +262,20 @@ console.log(`${count} events pending`);
 
 ## Automatic Behavior
 
-The SDK automatically:
+The SDK automatically handles the following without any additional configuration:
 
-- **Generates anonymous user ID** (UUID, persisted in cookies + localStorage)
-- **Persists events** to localStorage (with in-memory fallback)
-- **Batches events** for efficient network usage
-- **Flushes on interval** (default: every 30 seconds)
-- **Flushes on visibility change** when the tab is hidden
-- **Compresses payloads** using gzip for large batches (>1KB)
-- **Retries on failure** for network errors (events are preserved)
-- **Handles rate limiting** with exponential backoff
-- **Persists identified user ID** across page loads
-- **Generates session IDs** per page load
+- **Anonymous user ID generation** - UUID automatically generated and persisted in cookies + localStorage
+- **Event persistence** - Events are saved to localStorage (with in-memory fallback) and survive page reloads
+- **Batch processing** - Events are grouped for efficient network usage
+- **Periodic flush** - Events are sent every 30 seconds (configurable via `flushInterval`)
+- **Visibility-based flush** - Events are sent when the tab is hidden or page unloads
+- **Payload compression** - Large batches (>1KB) are automatically gzip compressed
+- **Retry on failure** - Failed requests are retried; events are preserved until successfully sent
+- **Rate limiting** - Exponential backoff when rate limited by the server
+- **User ID persistence** - User identity set via `identify()` persists across page loads
+- **Session management** - New session ID generated on each page load
+- **Offline support** - Events queue locally when offline and send when connectivity returns
+- **Deduplication** - Events include unique IDs (`client_event_id`) to prevent duplicate processing
 
 ## Debug Logging
 
