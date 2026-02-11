@@ -7,18 +7,17 @@ A lightweight JavaScript/TypeScript SDK for tracking analytics events with [Most
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
-- [Configuration Options](#configuration-options)
 - [User Identification](#user-identification)
-- [Tracking Events](#tracking-events)
-- [Event Naming](#event-naming)
-- [Properties](#properties)
+- [Configuration Options](#configuration-options)
 - [Automatic Events](#automatic-events)
 - [Automatic Properties](#automatic-properties)
 - [Automatic Context](#automatic-context)
-- [Automatic Behavior](#automatic-behavior)
-- [Framework Integration](#framework-integration)
+- [Event Naming](#event-naming)
+- [Properties](#properties)
 - [Manual Flush](#manual-flush)
+- [Automatic Behavior](#automatic-behavior)
 - [Debug Logging](#debug-logging)
+- [Framework Integration](#framework-integration)
 - [Custom Storage](#custom-storage)
 - [License](#license)
 
@@ -79,6 +78,46 @@ MostlyGoodMetrics.resetIdentity();
 
 That's it! Events are automatically batched and sent.
 
+## User Identification
+
+The SDK automatically generates and persists an anonymous user ID (UUID) for each user. This anonymous ID is stored in both cookies and localStorage, persisting across sessions.
+
+```typescript
+// Before identify(): user_id = auto-generated UUID (e.g., "550e8400-e29b-41d4-a716-446655440000")
+MostlyGoodMetrics.identify('user_123');
+// After identify(): user_id = "user_123"
+
+MostlyGoodMetrics.resetIdentity();
+// After reset: user_id = new auto-generated UUID
+```
+
+### Cross-Subdomain Tracking
+
+To track users across subdomains (e.g., `app.example.com` and `blog.example.com`), configure a shared cookie domain:
+
+```typescript
+MostlyGoodMetrics.configure({
+  apiKey: 'mgm_proj_your_api_key',
+  cookieDomain: '.example.com', // Share ID across all *.example.com subdomains
+});
+```
+
+### Privacy Mode
+
+For privacy-focused implementations or GDPR compliance, you can disable cookies entirely:
+
+```typescript
+MostlyGoodMetrics.configure({
+  apiKey: 'mgm_proj_your_api_key',
+  disableCookies: true, // Uses localStorage only, no cookies
+});
+```
+
+When `disableCookies: true`:
+- Anonymous ID stored in localStorage only
+- No cookies are set
+- Cross-subdomain tracking is disabled
+
 ## Configuration Options
 
 For more control, pass additional configuration:
@@ -116,105 +155,6 @@ MostlyGoodMetrics.configure({
 | `anonymousId` | auto-generated | Override anonymous ID (for wrapper SDKs) |
 | `storage` | auto-detected | Custom storage adapter (see [Custom Storage](#custom-storage)) |
 | `networkClient` | fetch-based | Custom network client |
-
-## User Identification
-
-The SDK automatically generates and persists an anonymous user ID (UUID) for each user. This ID:
-- Is auto-generated on first visit
-- Persists across sessions (stored in cookies + localStorage)
-- Is included in every event as `user_id`
-
-When you call `identify()`, the identified user ID replaces the anonymous ID and also persists across sessions.
-
-```typescript
-// Before identify(): user_id = "550e8400-e29b-41d4-a716-446655440000" (auto-generated)
-MostlyGoodMetrics.identify('user_123');
-// After identify(): user_id = "user_123"
-
-MostlyGoodMetrics.resetIdentity();
-// After reset: user_id = new auto-generated UUID
-```
-
-### Cookie & Privacy Considerations
-
-By default, the anonymous ID is stored in both:
-- **Cookies**: Enables cross-subdomain tracking when `cookieDomain` is configured (e.g., `.example.com`)
-- **localStorage**: Provides fallback when cookies are disabled
-
-For privacy-focused implementations:
-
-```typescript
-MostlyGoodMetrics.configure({
-  apiKey: 'mgm_proj_your_api_key',
-  disableCookies: true, // GDPR/privacy mode - uses localStorage only
-});
-```
-
-When `disableCookies: true`:
-- Anonymous ID is stored in localStorage only
-- No cookies are set
-- Cross-subdomain tracking is disabled
-
-## Tracking Events
-
-Track events with the `track()` method:
-
-```typescript
-// Simple event
-MostlyGoodMetrics.track('button_clicked');
-
-// Event with properties
-MostlyGoodMetrics.track('purchase_completed', {
-  product_id: 'SKU123',
-  price: 29.99,
-  currency: 'USD',
-});
-```
-
-## Event Naming
-
-Event names must:
-- Start with a letter (or `$` for system events)
-- Contain only alphanumeric characters and underscores
-- Be 255 characters or less
-
-**Reserved `$` prefix:** The `$` prefix is reserved for system events (like `$app_opened`, `$app_installed`). Do not use `$` for custom event names.
-
-```typescript
-// Valid
-MostlyGoodMetrics.track('button_clicked');
-MostlyGoodMetrics.track('PurchaseCompleted');
-MostlyGoodMetrics.track('step_1_completed');
-
-// Invalid (will be ignored)
-MostlyGoodMetrics.track('123_event');      // starts with number
-MostlyGoodMetrics.track('event-name');     // contains hyphen
-MostlyGoodMetrics.track('event name');     // contains space
-MostlyGoodMetrics.track('$custom_event');  // $ prefix is reserved
-```
-
-## Properties
-
-Events support various property types:
-
-```typescript
-MostlyGoodMetrics.track('checkout', {
-  string_prop: 'value',
-  int_prop: 42,
-  double_prop: 3.14,
-  bool_prop: true,
-  null_prop: null,
-  list_prop: ['a', 'b', 'c'],
-  nested: {
-    key: 'value',
-  },
-});
-```
-
-**Limits:**
-- String values: truncated to 1000 characters
-- Nesting depth: max 3 levels
-- Total properties size: max 10KB
 
 ## Automatic Events
 
@@ -282,6 +222,66 @@ The SDK automatically includes these fields with every event to provide rich con
 | `client_event_id` | Unique UUID for each event | `550e8400-e29b-41d4-a716-446655440000` | Deduplication (prevents processing the same event twice) |
 | `timestamp` | ISO 8601 timestamp when event was tracked | `2024-01-15T10:30:00.000Z` | Event ordering and time-based analysis |
 
+## Event Naming
+
+Event names must:
+- Start with a letter (or `$` for system events)
+- Contain only alphanumeric characters and underscores
+- Be 255 characters or less
+
+> **Note:** The `$` prefix is reserved for system events (like `$app_opened`, `$app_installed`). Do not use `$` for custom event names.
+
+```typescript
+// Valid
+MostlyGoodMetrics.track('button_clicked');
+MostlyGoodMetrics.track('PurchaseCompleted');
+MostlyGoodMetrics.track('step_1_completed');
+
+// Invalid (will be ignored)
+MostlyGoodMetrics.track('123_event');      // starts with number
+MostlyGoodMetrics.track('event-name');     // contains hyphen
+MostlyGoodMetrics.track('event name');     // contains space
+MostlyGoodMetrics.track('$custom_event');  // $ prefix is reserved
+```
+
+## Properties
+
+Events support various property types:
+
+```typescript
+MostlyGoodMetrics.track('checkout', {
+  string_prop: 'value',
+  int_prop: 42,
+  double_prop: 3.14,
+  bool_prop: true,
+  null_prop: null,
+  list_prop: ['a', 'b', 'c'],
+  nested: {
+    key: 'value',
+  },
+});
+```
+
+**Limits:**
+- String values: truncated to 1000 characters
+- Nesting depth: max 3 levels
+- Total properties size: max 10KB
+
+## Manual Flush
+
+Events are automatically flushed periodically and when the page is hidden. You can also trigger a manual flush:
+
+```typescript
+await MostlyGoodMetrics.flush();
+```
+
+To check pending events:
+
+```typescript
+const count = await MostlyGoodMetrics.getPendingEventCount();
+console.log(`${count} events pending`);
+```
+
 ## Automatic Behavior
 
 The SDK handles many tasks automatically to provide a seamless analytics experience:
@@ -317,21 +317,6 @@ When `trackAppLifecycleEvents` is enabled, the SDK automatically:
 - **Captures locale**: Includes user's language/region setting
 - **Captures timezone**: Includes user's timezone for accurate time-based analysis
 
-## Manual Flush
-
-Events are automatically flushed periodically and when the page is hidden. You can also trigger a manual flush:
-
-```typescript
-await MostlyGoodMetrics.flush();
-```
-
-To check pending events:
-
-```typescript
-const count = await MostlyGoodMetrics.getPendingEventCount();
-console.log(`${count} events pending`);
-```
-
 ## Debug Logging
 
 Enable debug logging to see SDK activity:
@@ -349,29 +334,6 @@ Output example:
 [MostlyGoodMetrics] [DEBUG] Tracking event: button_clicked
 [MostlyGoodMetrics] [DEBUG] Starting flush
 [MostlyGoodMetrics] [DEBUG] Successfully sent 5 events
-```
-
-## Custom Storage
-
-You can provide a custom storage adapter for environments where localStorage isn't available:
-
-```typescript
-import { MostlyGoodMetrics, IEventStorage, InMemoryEventStorage } from '@mostly-good-metrics/javascript';
-
-// Use in-memory storage
-MostlyGoodMetrics.configure({
-  apiKey: 'mgm_proj_your_api_key',
-  storage: new InMemoryEventStorage(10000),
-});
-
-// Or implement your own
-class MyCustomStorage implements IEventStorage {
-  async store(event: MGMEvent): Promise<void> { /* ... */ }
-  async fetchEvents(limit: number): Promise<MGMEvent[]> { /* ... */ }
-  async removeEvents(count: number): Promise<void> { /* ... */ }
-  async eventCount(): Promise<number> { /* ... */ }
-  async clear(): Promise<void> { /* ... */ }
-}
 ```
 
 ## Framework Integration
@@ -444,6 +406,29 @@ export default {
 // src/main.ts
 import analytics from './plugins/analytics';
 app.use(analytics);
+```
+
+## Custom Storage
+
+You can provide a custom storage adapter for environments where localStorage isn't available:
+
+```typescript
+import { MostlyGoodMetrics, IEventStorage, InMemoryEventStorage } from '@mostly-good-metrics/javascript';
+
+// Use in-memory storage
+MostlyGoodMetrics.configure({
+  apiKey: 'mgm_proj_your_api_key',
+  storage: new InMemoryEventStorage(10000),
+});
+
+// Or implement your own
+class MyCustomStorage implements IEventStorage {
+  async store(event: MGMEvent): Promise<void> { /* ... */ }
+  async fetchEvents(limit: number): Promise<MGMEvent[]> { /* ... */ }
+  async removeEvents(count: number): Promise<void> { /* ... */ }
+  async eventCount(): Promise<number> { /* ... */ }
+  async clear(): Promise<void> { /* ... */ }
+}
 ```
 
 ## License
