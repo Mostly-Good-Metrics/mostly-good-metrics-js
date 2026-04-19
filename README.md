@@ -2,6 +2,25 @@
 
 A lightweight JavaScript/TypeScript SDK for tracking analytics events with [MostlyGoodMetrics](https://mostlygoodmetrics.com).
 
+## Table of Contents
+
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [User Identification](#user-identification)
+- [Configuration Options](#configuration-options)
+- [Automatic Events](#automatic-events)
+- [Automatic Properties](#automatic-properties)
+- [Automatic Context](#automatic-context)
+- [Event Naming](#event-naming)
+- [Properties](#properties)
+- [Manual Flush](#manual-flush)
+- [Automatic Behavior](#automatic-behavior)
+- [Debug Logging](#debug-logging)
+- [Framework Integration](#framework-integration)
+- [Custom Storage](#custom-storage)
+- [License](#license)
+
 ## Requirements
 
 - Node.js 16+ (for build tools)
@@ -61,45 +80,43 @@ That's it! Events are automatically batched and sent.
 
 ## User Identification
 
-The SDK automatically generates and persists an anonymous `user_id` (UUID) for each user. This ID:
-- Is auto-generated on first visit
-- Persists across sessions (stored in cookies and localStorage)
-- Is included in every event as `user_id`
-
-When you call `identify()`, the identified user ID takes precedence over the anonymous ID.
+The SDK automatically generates and persists an anonymous user ID (UUID) for each user. This anonymous ID is stored in both cookies and localStorage, persisting across sessions.
 
 ```typescript
-// Before identify(): user_id = "550e8400-e29b-41d4-a716-446655440000" (auto-generated)
+// Before identify(): user_id = auto-generated UUID (e.g., "550e8400-e29b-41d4-a716-446655440000")
 MostlyGoodMetrics.identify('user_123');
 // After identify(): user_id = "user_123"
 
 MostlyGoodMetrics.resetIdentity();
-// After reset: user_id = "550e8400-e29b-41d4-a716-446655440000" (back to anonymous)
+// After reset: user_id = new auto-generated UUID
 ```
 
 ### Cross-Subdomain Tracking
 
-By default, the anonymous ID is stored in cookies (with localStorage fallback). To share the anonymous ID across subdomains:
+To track users across subdomains (e.g., `app.example.com` and `blog.example.com`), configure a shared cookie domain:
 
 ```typescript
 MostlyGoodMetrics.configure({
   apiKey: 'mgm_proj_your_api_key',
-  cookieDomain: '.yourdomain.com', // Share across all subdomains
+  cookieDomain: '.example.com', // Share ID across all *.example.com subdomains
 });
 ```
 
-This allows tracking the same user across `app.yourdomain.com`, `www.yourdomain.com`, etc.
+### Privacy Mode
 
-### Privacy Mode (No Cookies)
-
-For GDPR compliance or privacy-focused applications, you can disable cookies entirely:
+For privacy-focused implementations or GDPR compliance, you can disable cookies entirely:
 
 ```typescript
 MostlyGoodMetrics.configure({
   apiKey: 'mgm_proj_your_api_key',
-  disableCookies: true, // Only use localStorage
+  disableCookies: true, // Uses localStorage only, no cookies
 });
 ```
+
+When `disableCookies: true`:
+- Anonymous ID stored in localStorage only
+- No cookies are set
+- Cross-subdomain tracking is disabled
 
 ## Configuration Options
 
@@ -116,6 +133,8 @@ MostlyGoodMetrics.configure({
   maxStoredEvents: 10000,
   enableDebugLogging: process.env.NODE_ENV === 'development',
   trackAppLifecycleEvents: true,
+  cookieDomain: '.yourdomain.com',
+  disableCookies: false,
 });
 ```
 
@@ -132,9 +151,9 @@ MostlyGoodMetrics.configure({
 | `trackAppLifecycleEvents` | `false` | Auto-track lifecycle events ($app_opened, etc.) |
 | `bundleId` | auto-detected | Custom bundle identifier |
 | `cookieDomain` | - | Cookie domain for cross-subdomain tracking (e.g., `.example.com`) |
-| `disableCookies` | `false` | Disable cookies, use only localStorage |
-| `anonymousId` | auto-generated | Override anonymous ID (for wrapper SDKs like React Native) |
-| `storage` | auto-detected | Custom storage adapter |
+| `disableCookies` | `false` | Disable cookies entirely (uses localStorage only) |
+| `anonymousId` | auto-generated | Override anonymous ID (for wrapper SDKs) |
+| `storage` | auto-detected | Custom storage adapter (see [Custom Storage](#custom-storage)) |
 | `networkClient` | fetch-based | Custom network client |
 
 ## Automatic Events
@@ -154,12 +173,54 @@ When `trackAppLifecycleEvents` is enabled, the SDK automatically tracks:
 
 The SDK automatically includes these properties with every event:
 
-| Property | Description |
-|----------|-------------|
-| `$device_type` | Device type (`desktop`, `phone`, `tablet`) |
-| `$device_model` | Browser name and version |
+| Property | Description | Example | Source |
+|----------|-------------|---------|--------|
+| `$device_type` | Device form factor | `desktop`, `phone`, `tablet` | Detected from user agent and screen size |
+| `$device_model` | Browser name and major version | `Chrome 120.0` | Parsed from user agent |
+| `$browser` | Browser name | `Chrome`, `Safari`, `Firefox` | Parsed from user agent |
+| `$browser_version` | Full browser version | `120.0.6099.130` | Parsed from user agent |
+| `$os` | Operating system name | `Mac OS X`, `Windows`, `Linux`, `iOS`, `Android` | Parsed from user agent |
+| `$os_version` | Operating system version | `10.15.7` | Parsed from user agent |
+| `$screen_width` | Screen width in pixels | `1920` | `window.screen.width` |
+| `$screen_height` | Screen height in pixels | `1080` | `window.screen.height` |
+| `$viewport_width` | Viewport width in pixels | `1440` | `window.innerWidth` |
+| `$viewport_height` | Viewport height in pixels | `900` | `window.innerHeight` |
+| `$user_agent` | Full user agent string | `Mozilla/5.0...` | `navigator.userAgent` |
 
-Additionally, `osVersion` and `appVersion` (if configured) are included at the event level.
+> **Note:** Properties with the `$` prefix are reserved for system use. Do not use the `$` prefix for your own custom properties.
+
+## Automatic Context
+
+The SDK automatically includes these fields with every event to provide rich context:
+
+### Identity & Session
+
+| Field | Description | Example | Persistence |
+|-------|-------------|---------|-------------|
+| `user_id` | Identified user ID (set via `identify()`) or auto-generated anonymous UUID | `user_123` | Persisted in cookies + localStorage (survives page reloads) |
+| `session_id` | UUID generated per page load | `abc123-def456` | Regenerated on each page load |
+
+### Device & Platform
+
+| Field | Description | Example | Source |
+|-------|-------------|---------|--------|
+| `platform` | Platform identifier | `web` | Hardcoded |
+| `locale` | User's locale | `en-US` | `Intl.DateTimeFormat().resolvedOptions().locale` |
+| `timezone` | User's timezone | `America/New_York` | `Intl.DateTimeFormat().resolvedOptions().timeZone` |
+
+### App & Environment
+
+| Field | Description | Example | Source |
+|-------|-------------|---------|--------|
+| `app_version` | App version (if configured) | `1.2.0` | Configuration option |
+| `environment` | Environment name | `production`, `staging`, `development` | Configuration option (default: `production`) |
+
+### Event Metadata
+
+| Field | Description | Example | Purpose |
+|-------|-------------|---------|---------|
+| `client_event_id` | Unique UUID for each event | `550e8400-e29b-41d4-a716-446655440000` | Deduplication (prevents processing the same event twice) |
+| `timestamp` | ISO 8601 timestamp when event was tracked | `2024-01-15T10:30:00.000Z` | Event ordering and time-based analysis |
 
 ## Event Naming
 
@@ -167,6 +228,8 @@ Event names must:
 - Start with a letter (or `$` for system events)
 - Contain only alphanumeric characters and underscores
 - Be 255 characters or less
+
+> **Note:** The `$` prefix is reserved for system events (like `$app_opened`, `$app_installed`). Do not use `$` for custom event names.
 
 ```typescript
 // Valid
@@ -178,6 +241,7 @@ MostlyGoodMetrics.track('step_1_completed');
 MostlyGoodMetrics.track('123_event');      // starts with number
 MostlyGoodMetrics.track('event-name');     // contains hyphen
 MostlyGoodMetrics.track('event name');     // contains space
+MostlyGoodMetrics.track('$custom_event');  // $ prefix is reserved
 ```
 
 ## Properties
@@ -220,18 +284,38 @@ console.log(`${count} events pending`);
 
 ## Automatic Behavior
 
-The SDK automatically:
+The SDK handles many tasks automatically to provide a seamless analytics experience:
 
-- **Generates anonymous user ID** (UUID, persisted in cookies + localStorage)
-- **Persists events** to localStorage (with in-memory fallback)
-- **Batches events** for efficient network usage
-- **Flushes on interval** (default: every 30 seconds)
-- **Flushes on visibility change** when the tab is hidden
-- **Compresses payloads** using gzip for large batches (>1KB)
-- **Retries on failure** for network errors (events are preserved)
-- **Handles rate limiting** with exponential backoff
-- **Persists identified user ID** across page loads
-- **Generates session IDs** per page load
+### Identity Management
+- **Generates anonymous user ID**: Creates a persistent UUID on first visit, stored in cookies + localStorage
+- **Persists identified user ID**: Stores user ID (from `identify()`) in cookies + localStorage, automatically restored on page reload
+- **Generates session IDs**: Creates a new UUID on each page load to track user sessions
+
+### Event Storage & Delivery
+- **Persists events**: Stores events in localStorage (with in-memory fallback if unavailable)
+- **Batches events**: Groups events together for efficient network usage (default: 100 events per batch)
+- **Flushes on interval**: Automatically sends events every 30 seconds (configurable via `flushInterval`)
+- **Flushes on visibility change**: Sends pending events when tab is hidden or page unloads
+- **Compresses payloads**: Large batches (>1KB) are automatically gzip compressed
+- **Retries on failure**: Preserves events on network errors and retries with exponential backoff
+- **Handles rate limiting**: Automatically backs off when server rate limits are hit
+- **Adds deduplication IDs**: Includes unique `client_event_id` with each event to prevent duplicate processing
+- **Offline support**: Events queue locally when offline and send when connectivity returns
+
+### Lifecycle Tracking
+When `trackAppLifecycleEvents` is enabled, the SDK automatically:
+- **Detects install**: Tracks `$app_installed` event on first visit (requires `appVersion` config)
+- **Detects updates**: Tracks `$app_updated` event when app version changes (requires `appVersion` config)
+- **Tracks page visibility**: Fires `$app_opened` when page becomes visible
+- **Tracks page hidden**: Fires `$app_backgrounded` when page is hidden or unloads
+
+### Platform Integration
+- **Detects device type**: Automatically identifies desktop, phone, or tablet from user agent and screen size
+- **Captures browser info**: Includes browser name and version with every event
+- **Captures OS info**: Includes operating system name and version with every event
+- **Captures screen dimensions**: Includes screen and viewport size for UI analytics
+- **Captures locale**: Includes user's language/region setting
+- **Captures timezone**: Includes user's timezone for accurate time-based analysis
 
 ## Debug Logging
 
@@ -252,30 +336,9 @@ Output example:
 [MostlyGoodMetrics] [DEBUG] Successfully sent 5 events
 ```
 
-## Custom Storage
-
-You can provide a custom storage adapter for environments where localStorage isn't available:
-
-```typescript
-import { MostlyGoodMetrics, IEventStorage, InMemoryEventStorage } from '@mostly-good-metrics/javascript';
-
-// Use in-memory storage
-MostlyGoodMetrics.configure({
-  apiKey: 'mgm_proj_your_api_key',
-  storage: new InMemoryEventStorage(10000),
-});
-
-// Or implement your own
-class MyCustomStorage implements IEventStorage {
-  async store(event: MGMEvent): Promise<void> { /* ... */ }
-  async fetchEvents(limit: number): Promise<MGMEvent[]> { /* ... */ }
-  async removeEvents(count: number): Promise<void> { /* ... */ }
-  async eventCount(): Promise<number> { /* ... */ }
-  async clear(): Promise<void> { /* ... */ }
-}
-```
-
 ## Framework Integration
+
+The SDK supports both JavaScript and TypeScript projects. All type definitions are included automatically.
 
 ### React
 
@@ -345,19 +408,27 @@ import analytics from './plugins/analytics';
 app.use(analytics);
 ```
 
-## TypeScript Support
+## Custom Storage
 
-Full TypeScript support with exported types:
+You can provide a custom storage adapter for environments where localStorage isn't available:
 
 ```typescript
-import {
-  MostlyGoodMetrics,
-  MGMConfiguration,
-  MGMEvent,
-  EventProperties,
-  IEventStorage,
-  INetworkClient,
-} from '@mostly-good-metrics/javascript';
+import { MostlyGoodMetrics, IEventStorage, InMemoryEventStorage } from '@mostly-good-metrics/javascript';
+
+// Use in-memory storage
+MostlyGoodMetrics.configure({
+  apiKey: 'mgm_proj_your_api_key',
+  storage: new InMemoryEventStorage(10000),
+});
+
+// Or implement your own
+class MyCustomStorage implements IEventStorage {
+  async store(event: MGMEvent): Promise<void> { /* ... */ }
+  async fetchEvents(limit: number): Promise<MGMEvent[]> { /* ... */ }
+  async removeEvents(count: number): Promise<void> { /* ... */ }
+  async eventCount(): Promise<number> { /* ... */ }
+  async clear(): Promise<void> { /* ... */ }
+}
 ```
 
 ## License
