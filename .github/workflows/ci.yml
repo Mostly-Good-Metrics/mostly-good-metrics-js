@@ -65,3 +65,11 @@ jobs:
         with:
           file: ./coverage/lcov.info
           fail_ci_if_error: false
+
+      - name: Upload coverage to Covallaby
+        if: github.event_name == 'push'
+        continue-on-error: true
+        run: |
+          curl -sf -X POST "https://app.covallaby.com/api/v1/upload?repo=${{ github.repository }}&branch=${{ github.ref_name }}&commit=${{ github.sha }}" \
+            -H "Authorization: Bearer ${{ secrets.COVALLABY_TOKEN }}" \
+            --data-binary @coverage/lcov.info
