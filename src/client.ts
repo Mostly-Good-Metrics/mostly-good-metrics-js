@@ -942,8 +942,8 @@ export class MostlyGoodMetrics {
     this.trackedExposures.add(exposureKey);
 
     this.track(SystemEvents.EXPERIMENT_EXPOSURE, {
-      experiment: experimentName,
-      variant,
+      [SystemProperties.EXPERIMENT_NAME]: experimentName,
+      [SystemProperties.VARIANT]: variant,
     });
 
     void this.persistExposures();

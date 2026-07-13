@@ -1401,8 +1401,8 @@ describe('MostlyGoodMetrics', () => {
 
         const exposures = await exposureEvents(storage);
         expect(exposures).toHaveLength(1);
-        expect(exposures[0].properties?.experiment).toBe('checkout-flow');
-        expect(exposures[0].properties?.variant).toBe('treatment');
+        expect(exposures[0].properties?.$experiment_name).toBe('checkout-flow');
+        expect(exposures[0].properties?.$variant).toBe('treatment');
       });
 
       it('should not re-track exposure across simulated restarts (persisted dedup)', async () => {
@@ -1447,7 +1447,7 @@ describe('MostlyGoodMetrics', () => {
 
         const exposures = await exposureEvents(storage);
         expect(exposures).toHaveLength(2);
-        expect(exposures[1].properties?.variant).toBe('b');
+        expect(exposures[1].properties?.$variant).toBe('b');
       });
 
       it('should still set the super property on getVariant hit', async () => {

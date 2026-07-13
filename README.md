@@ -311,7 +311,7 @@ Assigned variants are cached locally per user and **never expire**:
 
 ### Exposure tracking
 
-On the first `getVariant()` hit per (user, experiment, variant), the SDK automatically tracks a `$experiment_exposure` event with properties `{ experiment, variant }`. Deduplication flags are persisted, so exposures are not re-tracked across page reloads or app restarts.
+On the first `getVariant()` hit per (user, experiment, variant), the SDK automatically tracks a `$experiment_exposure` event with properties `$experiment_name` (the raw experiment name) and `$variant`. Deduplication flags are persisted, so exposures are not re-tracked across page reloads or app restarts.
 
 The variant is also stored as a super property (`$experiment_{name}: variant`, snake_cased) so it is attached to all subsequent events.
 

@@ -499,6 +499,8 @@ export const SystemProperties = {
   VERSION: '$version',
   PREVIOUS_VERSION: '$previous_version',
   SDK: '$sdk',
+  EXPERIMENT_NAME: '$experiment_name',
+  VARIANT: '$variant',
 } as const;
 
 /**
