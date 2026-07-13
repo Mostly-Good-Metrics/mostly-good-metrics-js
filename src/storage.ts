@@ -1,5 +1,12 @@
 import { logger } from './logger';
-import { Constraints, EventProperties, IEventStorage, MGMError, MGMEvent } from './types';
+import {
+  Constraints,
+  EventProperties,
+  IEventStorage,
+  IExperimentStorage,
+  MGMError,
+  MGMEvent,
+} from './types';
 
 const STORAGE_KEY = 'mostlygoodmetrics_events';
 const USER_ID_KEY = 'mostlygoodmetrics_user_id';
@@ -225,6 +232,56 @@ export function createDefaultStorage(maxEvents: number): IEventStorage {
 
   logger.debug('LocalStorage not available, using in-memory storage');
   return new InMemoryEventStorage(maxEvents);
+}
+
+/**
+ * localStorage-backed experiment storage adapter (default in browsers).
+ */
+export class LocalStorageExperimentStorage implements IExperimentStorage {
+  getItem(key: string): string | null {
+    try {
+      return localStorage.getItem(key);
+    } catch (e) {
+      logger.debug(`Failed to read '${key}' from localStorage`, e);
+      return null;
+    }
+  }
+
+  setItem(key: string, value: string): void {
+    try {
+      localStorage.setItem(key, value);
+    } catch (e) {
+      logger.debug(`Failed to write '${key}' to localStorage`, e);
+    }
+  }
+}
+
+/**
+ * In-memory experiment storage adapter.
+ * Used as a fallback when localStorage is not available, or for testing.
+ */
+export class InMemoryExperimentStorage implements IExperimentStorage {
+  private values = new Map<string, string>();
+
+  getItem(key: string): string | null {
+    return this.values.get(key) ?? null;
+  }
+
+  setItem(key: string, value: string): void {
+    this.values.set(key, value);
+  }
+}
+
+/**
+ * Create the appropriate experiment storage implementation for the environment.
+ * React Native apps should inject an AsyncStorage-backed adapter via the
+ * `experimentStorage` configuration option instead.
+ */
+export function createDefaultExperimentStorage(): IExperimentStorage {
+  if (isLocalStorageAvailable()) {
+    return new LocalStorageExperimentStorage();
+  }
+  return new InMemoryExperimentStorage();
 }
 
 /**

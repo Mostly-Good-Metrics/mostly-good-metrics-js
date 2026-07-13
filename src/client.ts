@@ -1,11 +1,12 @@
 import { logger, setDebugLogging } from './logger';
 import { createDefaultNetworkClient } from './network';
-import { createDefaultStorage, persistence } from './storage';
+import { createDefaultExperimentStorage, createDefaultStorage, persistence } from './storage';
 import {
   CachedExperimentVariants,
   EventProperties,
   ExperimentsResponse,
   IEventStorage,
+  IExperimentStorage,
   INetworkClient,
   MGMConfiguration,
   MGMEvent,
@@ -33,7 +34,8 @@ import {
 
 const FLUSH_DELAY_MS = 100; // Delay between batch sends
 const EXPERIMENTS_CACHE_KEY = 'mgm_experiment_variants';
-const EXPERIMENTS_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const EXPERIMENT_EXPOSURES_KEY = 'mgm_experiment_exposures';
+const EXPERIMENTS_REFETCH_INTERVAL_MS = 60 * 60 * 1000; // Background revalidation at most hourly
 
 /**
  * Main client for MostlyGoodMetrics.
@@ -53,9 +55,11 @@ export class MostlyGoodMetrics {
 
   // A/B testing state
   private assignedVariants: Record<string, string> = {}; // Server-assigned variants
+  private experimentStorage: IExperimentStorage;
   private experimentsLoaded = false;
   private experimentsReadyResolve: (() => void) | null = null;
   private experimentsReadyPromise: Promise<void>;
+  private trackedExposures = new Set<string>(); // (user, experiment, variant) exposure dedup
 
   /**
    * Private constructor - use `configure` to create an instance.
@@ -80,6 +84,9 @@ export class MostlyGoodMetrics {
     // Initialize network client
     this.networkClient = this.config.networkClient ?? createDefaultNetworkClient();
 
+    // Initialize experiment storage (pluggable for React Native AsyncStorage etc.)
+    this.experimentStorage = this.config.experimentStorage ?? createDefaultExperimentStorage();
+
     // Initialize experiments ready promise
     this.experimentsReadyPromise = new Promise((resolve) => {
       this.experimentsReadyResolve = resolve;
@@ -95,8 +102,11 @@ export class MostlyGoodMetrics {
       this.setupLifecycleTracking();
     }
 
-    // Fetch experiments in background
-    void this.fetchExperiments();
+    // Hydrate the experiments cache and revalidate in the background
+    void this.initializeExperiments().catch((e) => {
+      logger.warn('Failed to initialize experiments', e);
+      this.markExperimentsReady();
+    });
   }
 
   /**
@@ -233,10 +243,12 @@ export class MostlyGoodMetrics {
 
   /**
    * Get the variant for an experiment.
-   * Returns the assigned variant ('a', 'b', etc.) or null if experiment not found.
+   * Returns the assigned variant ('a', 'b', etc.), or `fallback` (default null)
+   * if the experiment is unknown or experiments have not loaded yet.
    */
-  static getVariant(experimentName: string): string | null {
-    return MostlyGoodMetrics.instance?.getVariant(experimentName) ?? null;
+  static getVariant(experimentName: string, fallback: string | null = null): string | null {
+    const instance = MostlyGoodMetrics.instance;
+    return instance ? instance.getVariant(experimentName, fallback) : fallback;
   }
 
   /**
@@ -369,11 +381,14 @@ export class MostlyGoodMetrics {
       this.sendIdentifyEventIfNeeded(userId, profile);
     }
 
-    // If user ID changed, invalidate experiment cache and refetch
-    // This handles the "identified wins" aliasing strategy on the server
+    // If user ID changed, refetch experiments immediately for the new user.
+    // Current in-memory variants keep being served until the response arrives,
+    // then they are swapped atomically - never cleared to null mid-session.
+    // The refetch includes anonymous_id so the server can honor the
+    // "identified wins" aliasing strategy.
     if (previousUserId !== userId) {
       logger.debug('User identity changed, refetching experiments');
-      this.invalidateExperimentsCache();
+      this.resetExperimentsReadyPromise();
       void this.fetchExperiments();
     }
   }
@@ -527,18 +542,22 @@ export class MostlyGoodMetrics {
 
   /**
    * Get the variant for an experiment.
-   * Returns the assigned variant ('a', 'b', etc.) or null if experiment not found.
+   * Returns the assigned variant ('a', 'b', etc.), or `fallback` (default null)
+   * if the experiment is unknown or experiments have not loaded yet.
    *
-   * Variants are assigned server-side and cached locally. The server ensures
-   * the same user always gets the same variant for the same experiment.
+   * Variants are assigned server-side and cached locally (forever, per user,
+   * with stale-while-revalidate background refreshes). The server ensures the
+   * same user always gets the same variant for the same experiment.
    *
-   * The variant is automatically stored as a super property ($experiment_{name}: 'variant')
-   * so it's attached to all subsequent events.
+   * On a hit, the variant is stored as a super property
+   * ($experiment_{name}: 'variant') so it's attached to all subsequent events,
+   * and a $experiment_exposure event is tracked once per
+   * (user, experiment, variant).
    */
-  getVariant(experimentName: string): string | null {
+  getVariant(experimentName: string, fallback: string | null = null): string | null {
     if (!experimentName) {
       logger.warn('getVariant called with empty experimentName');
-      return null;
+      return fallback;
     }
 
     // Check if we have a server-assigned variant for this experiment
@@ -549,6 +568,9 @@ export class MostlyGoodMetrics {
       const propertyName = `$experiment_${this.toSnakeCase(experimentName)}`;
       this.setSuperProperty(propertyName, variant);
 
+      // Track exposure once per (user, experiment, variant)
+      this.trackExposureIfNeeded(experimentName, variant);
+
       logger.debug(`Using server-assigned variant '${variant}' for experiment '${experimentName}'`);
       return variant;
     }
@@ -556,12 +578,12 @@ export class MostlyGoodMetrics {
     // No assigned variant - check if experiments have been loaded
     if (!this.experimentsLoaded) {
       logger.debug(`Experiments not loaded yet, cannot get variant for: ${experimentName}`);
-      return null;
+      return fallback;
     }
 
     // Experiments loaded but no assignment for this experiment
     logger.debug(`No variant assigned for experiment: ${experimentName}`);
-    return null;
+    return fallback;
   }
 
   /**
@@ -791,34 +813,61 @@ export class MostlyGoodMetrics {
   // =====================================================
 
   /**
-   * Fetch experiments from the server.
-   * Called automatically during initialization and after identify().
+   * Initialize experiments on startup.
    *
-   * Flow:
-   * 1. Check localStorage cache - if valid and same user, use cached variants
-   * 2. Otherwise, fetch from server with user_id
-   * 3. Store response in memory and localStorage cache
+   * Flow (stale-while-revalidate, no TTL):
+   * 1. Hydrate exposure dedup flags and the variants cache from the
+   *    (possibly async) experiment storage adapter.
+   * 2. If cached variants exist for the current user, serve them immediately
+   *    (ready() resolves) and revalidate in the background - but only if the
+   *    last fetch was more than an hour ago.
+   * 3. If there is no usable cache, fetch from the server (ready() resolves
+   *    when the fetch settles, even on failure).
+   */
+  private async initializeExperiments(): Promise<void> {
+    const currentUserId = this.userId ?? this.anonymousIdValue;
+
+    // Hydrate exposure flags first so exposure dedup survives restarts
+    await this.hydrateExposures();
+
+    const cached = await this.loadExperimentsCache();
+    if (cached && cached.userId === currentUserId) {
+      const cacheAge = Date.now() - cached.fetchedAt;
+      logger.debug(
+        `Using cached experiment variants (age: ${Math.round(cacheAge / 1000 / 60)}min)`
+      );
+
+      // Serve cached variants immediately - they never expire
+      this.assignedVariants = cached.variants;
+      this.markExperimentsReady();
+
+      // Revalidate in the background, throttled to at most once per hour
+      if (cacheAge >= EXPERIMENTS_REFETCH_INTERVAL_MS) {
+        logger.debug('Cached experiment variants are stale, revalidating in background');
+        void this.fetchExperiments();
+      }
+      return;
+    }
+
+    // No usable cache - fetch from the server
+    await this.fetchExperiments();
+  }
+
+  /**
+   * Fetch experiments from the server and atomically swap in the response.
+   * Called on initialization (when no fresh cache exists) and after identify().
+   * On failure, previously loaded variants keep being served.
    */
   private async fetchExperiments(): Promise<void> {
     const currentUserId = this.userId ?? this.anonymousIdValue;
 
-    // Check localStorage cache first
-    const cached = this.loadExperimentsCache();
-    if (cached && cached.userId === currentUserId) {
-      const cacheAge = Date.now() - cached.fetchedAt;
-      if (cacheAge < EXPERIMENTS_CACHE_TTL_MS) {
-        logger.debug(
-          `Using cached experiment variants (age: ${Math.round(cacheAge / 1000 / 60)}min)`
-        );
-        this.assignedVariants = cached.variants;
-        this.markExperimentsReady();
-        return;
-      }
-      logger.debug('Cached experiment variants expired, fetching fresh');
+    // Build URL with user_id for server-side variant assignment.
+    // When the user is identified, also pass the stored anonymous_id so the
+    // server can alias pre-identify assignments ("identified wins", MGM-28).
+    let url = `${this.config.baseURL}/v1/experiments?user_id=${encodeURIComponent(currentUserId)}`;
+    if (currentUserId !== this.anonymousIdValue) {
+      url += `&anonymous_id=${encodeURIComponent(this.anonymousIdValue)}`;
     }
-
-    // Build URL with user_id for server-side variant assignment
-    const url = `${this.config.baseURL}/v1/experiments?user_id=${encodeURIComponent(currentUserId)}`;
 
     try {
       logger.debug('Fetching experiments...');
@@ -833,17 +882,16 @@ export class MostlyGoodMetrics {
 
       if (!response.ok) {
         logger.warn(`Failed to fetch experiments: ${response.status}`);
-        this.markExperimentsReady();
         return;
       }
 
       const data = (await response.json()) as ExperimentsResponse;
 
-      // Store server-assigned variants
+      // Atomically swap in the server-assigned variants
       this.assignedVariants = data.assigned_variants ?? {};
 
-      // Cache in localStorage
-      this.saveExperimentsCache(currentUserId, this.assignedVariants);
+      // Persist to the experiment storage adapter (with last-fetch timestamp)
+      await this.saveExperimentsCache(currentUserId, this.assignedVariants);
 
       logger.debug(`Loaded ${Object.keys(this.assignedVariants).length} assigned variants`);
     } catch (e) {
@@ -865,15 +913,79 @@ export class MostlyGoodMetrics {
   }
 
   /**
-   * Load experiment variants from localStorage cache.
+   * Arm a new ready() promise for an in-flight refetch (e.g. after identify).
+   * No-op if the current promise is still pending - it will be resolved by
+   * whichever fetch settles first.
    */
-  private loadExperimentsCache(): CachedExperimentVariants | null {
-    if (typeof localStorage === 'undefined') {
-      return null;
+  private resetExperimentsReadyPromise(): void {
+    if (this.experimentsReadyResolve !== null) {
+      return;
     }
+    this.experimentsReadyPromise = new Promise((resolve) => {
+      this.experimentsReadyResolve = resolve;
+    });
+  }
 
+  /**
+   * Track a $experiment_exposure event the first time a (user, experiment,
+   * variant) combination is returned by getVariant(). Dedup flags are
+   * persisted via the experiment storage adapter so exposures are not
+   * re-tracked across restarts.
+   */
+  private trackExposureIfNeeded(experimentName: string, variant: string): void {
+    const currentUserId = this.userId ?? this.anonymousIdValue;
+    const exposureKey = `${currentUserId}::${experimentName}::${variant}`;
+
+    if (this.trackedExposures.has(exposureKey)) {
+      return;
+    }
+    this.trackedExposures.add(exposureKey);
+
+    this.track(SystemEvents.EXPERIMENT_EXPOSURE, {
+      experiment: experimentName,
+      variant,
+    });
+
+    void this.persistExposures();
+  }
+
+  /**
+   * Hydrate persisted exposure dedup flags from the experiment storage adapter.
+   */
+  private async hydrateExposures(): Promise<void> {
     try {
-      const cached = localStorage.getItem(EXPERIMENTS_CACHE_KEY);
+      const raw = await this.experimentStorage.getItem(EXPERIMENT_EXPOSURES_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as unknown;
+        if (Array.isArray(parsed)) {
+          this.trackedExposures = new Set(parsed.filter((k): k is string => typeof k === 'string'));
+        }
+      }
+    } catch (e) {
+      logger.debug('Failed to load experiment exposures', e);
+    }
+  }
+
+  /**
+   * Persist exposure dedup flags via the experiment storage adapter.
+   */
+  private async persistExposures(): Promise<void> {
+    try {
+      await this.experimentStorage.setItem(
+        EXPERIMENT_EXPOSURES_KEY,
+        JSON.stringify([...this.trackedExposures])
+      );
+    } catch (e) {
+      logger.debug('Failed to persist experiment exposures', e);
+    }
+  }
+
+  /**
+   * Load experiment variants from the experiment storage adapter.
+   */
+  private async loadExperimentsCache(): Promise<CachedExperimentVariants | null> {
+    try {
+      const cached = await this.experimentStorage.getItem(EXPERIMENTS_CACHE_KEY);
       if (!cached) {
         return null;
       }
@@ -885,47 +997,23 @@ export class MostlyGoodMetrics {
   }
 
   /**
-   * Save experiment variants to localStorage cache.
+   * Save experiment variants via the experiment storage adapter.
+   * `fetchedAt` doubles as the last-fetch timestamp used to throttle
+   * background revalidation - the cache itself never expires.
    */
-  private saveExperimentsCache(userId: string, variants: Record<string, string>): void {
-    if (typeof localStorage === 'undefined') {
-      return;
-    }
-
+  private async saveExperimentsCache(
+    userId: string,
+    variants: Record<string, string>
+  ): Promise<void> {
     try {
       const cached: CachedExperimentVariants = {
         userId,
         variants,
         fetchedAt: Date.now(),
       };
-      localStorage.setItem(EXPERIMENTS_CACHE_KEY, JSON.stringify(cached));
+      await this.experimentStorage.setItem(EXPERIMENTS_CACHE_KEY, JSON.stringify(cached));
     } catch (e) {
       logger.debug('Failed to save experiments cache', e);
-    }
-  }
-
-  /**
-   * Invalidate (clear) the localStorage experiments cache.
-   * Called when user identity changes.
-   */
-  private invalidateExperimentsCache(): void {
-    // Clear in-memory state
-    this.assignedVariants = {};
-    this.experimentsLoaded = false;
-
-    // Reset the ready promise for the new fetch
-    this.experimentsReadyPromise = new Promise((resolve) => {
-      this.experimentsReadyResolve = resolve;
-    });
-
-    // Clear localStorage cache
-    if (typeof localStorage !== 'undefined') {
-      try {
-        localStorage.removeItem(EXPERIMENTS_CACHE_KEY);
-        logger.debug('Invalidated experiments cache');
-      } catch (e) {
-        logger.debug('Failed to invalidate experiments cache', e);
-      }
     }
   }
 

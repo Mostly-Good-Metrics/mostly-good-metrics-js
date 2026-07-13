@@ -212,6 +212,7 @@ export function resolveConfiguration(config: MGMConfiguration): ResolvedConfigur
     sdkVersion: config.sdkVersion ?? '',
     storage: config.storage,
     networkClient: config.networkClient,
+    experimentStorage: config.experimentStorage,
     onError: config.onError,
   };
 }

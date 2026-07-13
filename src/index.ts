@@ -45,6 +45,7 @@ export type {
   MGMErrorType,
   SendResult,
   IEventStorage,
+  IExperimentStorage,
   INetworkClient,
   UserProfile,
   Experiment,
@@ -64,7 +65,14 @@ export {
 } from './types';
 
 // Storage implementations (for custom storage adapters)
-export { InMemoryEventStorage, LocalStorageEventStorage, createDefaultStorage } from './storage';
+export {
+  InMemoryEventStorage,
+  LocalStorageEventStorage,
+  createDefaultStorage,
+  InMemoryExperimentStorage,
+  LocalStorageExperimentStorage,
+  createDefaultExperimentStorage,
+} from './storage';
 
 // Network client (for custom network implementations)
 export { FetchNetworkClient, createDefaultNetworkClient } from './network';
