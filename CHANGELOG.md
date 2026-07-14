@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-14
+
 ### Added
 
 - `getVariant(name, fallback?)` now accepts an optional fallback value returned when the experiment is unknown or experiments have not loaded yet (defaults to `null`; backwards compatible). (MGM-31)
