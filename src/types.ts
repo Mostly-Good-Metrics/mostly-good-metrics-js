@@ -125,6 +125,15 @@ export interface MGMConfiguration {
   networkClient?: INetworkClient;
 
   /**
+   * Custom key-value storage adapter used for the experiments variant cache
+   * and exposure-event deduplication flags.
+   * The adapter may be asynchronous (e.g. React Native's AsyncStorage).
+   * If not provided, uses localStorage in browsers or in-memory storage
+   * in non-browser environments.
+   */
+  experimentStorage?: IExperimentStorage;
+
+  /**
    * Callback invoked when a network error occurs.
    * Useful for reporting errors to external services like Sentry.
    * @param error The error that occurred
@@ -138,11 +147,18 @@ export interface MGMConfiguration {
 export interface ResolvedConfiguration extends Required<
   Omit<
     MGMConfiguration,
-    'storage' | 'networkClient' | 'onError' | 'anonymousId' | 'cookieDomain' | 'disableCookies'
+    | 'storage'
+    | 'networkClient'
+    | 'experimentStorage'
+    | 'onError'
+    | 'anonymousId'
+    | 'cookieDomain'
+    | 'disableCookies'
   >
 > {
   storage?: IEventStorage;
   networkClient?: INetworkClient;
+  experimentStorage?: IExperimentStorage;
   onError?: (error: MGMError) => void;
 }
 
@@ -336,6 +352,25 @@ export interface IEventStorage {
 }
 
 /**
+ * Minimal key-value storage interface used for the experiments cache and
+ * exposure-event deduplication flags.
+ *
+ * Implementations may be synchronous (e.g. localStorage) or asynchronous
+ * (e.g. React Native's AsyncStorage) - the SDK awaits both forms.
+ */
+export interface IExperimentStorage {
+  /**
+   * Get a value by key. Returns null (or resolves to null) if not present.
+   */
+  getItem(key: string): string | null | Promise<string | null>;
+
+  /**
+   * Set a value for a key.
+   */
+  setItem(key: string, value: string): void | Promise<void>;
+}
+
+/**
  * Interface for network client implementations.
  */
 export interface INetworkClient {
@@ -390,6 +425,7 @@ export const SystemEvents = {
   APP_OPENED: '$app_opened',
   APP_BACKGROUNDED: '$app_backgrounded',
   IDENTIFY: '$identify',
+  EXPERIMENT_EXPOSURE: '$experiment_exposure',
 } as const;
 
 /**
@@ -463,6 +499,8 @@ export const SystemProperties = {
   VERSION: '$version',
   PREVIOUS_VERSION: '$previous_version',
   SDK: '$sdk',
+  EXPERIMENT_NAME: '$experiment_name',
+  VARIANT: '$variant',
 } as const;
 
 /**

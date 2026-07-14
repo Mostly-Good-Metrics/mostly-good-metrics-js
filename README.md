@@ -15,6 +15,7 @@ A lightweight JavaScript/TypeScript SDK for tracking analytics events with [Most
 - [Event Naming](#event-naming)
 - [Properties](#properties)
 - [Manual Flush](#manual-flush)
+- [A/B Testing (Experiments)](#ab-testing-experiments)
 - [Automatic Behavior](#automatic-behavior)
 - [Debug Logging](#debug-logging)
 - [Framework Integration](#framework-integration)
@@ -155,6 +156,7 @@ MostlyGoodMetrics.configure({
 | `anonymousId` | auto-generated | Override anonymous ID (for wrapper SDKs) |
 | `storage` | auto-detected | Custom storage adapter (see [Custom Storage](#custom-storage)) |
 | `networkClient` | fetch-based | Custom network client |
+| `experimentStorage` | auto-detected | Custom key-value storage for the experiments cache (see [A/B Testing](#ab-testing-experiments)) |
 
 ## Automatic Events
 
@@ -281,6 +283,63 @@ To check pending events:
 const count = await MostlyGoodMetrics.getPendingEventCount();
 console.log(`${count} events pending`);
 ```
+
+## A/B Testing (Experiments)
+
+Variants are assigned server-side (`GET /v1/experiments`) so the same user always gets the same variant for the same experiment.
+
+```typescript
+// Wait for experiments to load (resolves immediately if cached).
+// Resolves after 5 seconds at the latest so a hanging network never
+// blocks startup - pass a custom timeout with ready(timeoutMs).
+// ready() never rejects; if it times out, getVariant() returns fallbacks
+// until the in-flight fetch completes (a late response is still applied).
+await MostlyGoodMetrics.ready();
+
+// Get the assigned variant, with an optional fallback for when the
+// experiment is unknown or experiments haven't loaded yet (default: null)
+const variant = MostlyGoodMetrics.getVariant('checkout-flow', 'control');
+
+if (variant === 'treatment') {
+  // show the new checkout
+}
+```
+
+### Caching (stale-while-revalidate, no TTL)
+
+Assigned variants are cached locally per user and **never expire**:
+
+- Cached variants are served synchronously as soon as they are hydrated; `ready()` resolves without waiting for the network.
+- On a cold cache, `ready(timeoutMs = 5000)` resolves when the first experiments load settles or the timeout elapses, whichever comes first (it never rejects). The underlying request is aborted after 60 seconds so it always settles; a response arriving after a `ready()` timeout is still applied atomically.
+- A background refetch keeps assignments up to date, throttled to at most once per hour (the last-fetch timestamp is persisted).
+- On `identify()` with a changed user ID, the SDK keeps serving the current in-memory variants, refetches immediately (passing `anonymous_id` alongside `user_id` so the server can alias pre-identify assignments), and atomically swaps in the response. Variants are never cleared to null mid-session.
+
+### Exposure tracking
+
+On the first `getVariant()` hit per (user, experiment, variant), the SDK automatically tracks a `$experiment_exposure` event with properties `$experiment_name` (the raw experiment name) and `$variant`. Deduplication flags are persisted, so exposures are not re-tracked across page reloads or app restarts.
+
+The variant is also stored as a super property (`$experiment_{name}: variant`, snake_cased) so it is attached to all subsequent events.
+
+### Custom experiment storage (React Native)
+
+The experiments cache and exposure flags are persisted through a small pluggable key-value interface (`IExperimentStorage`). By default the SDK uses localStorage (or in-memory storage where unavailable). React Native apps should inject AsyncStorage:
+
+```typescript
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { MostlyGoodMetrics, IExperimentStorage } from '@mostly-good-metrics/javascript';
+
+const experimentStorage: IExperimentStorage = {
+  getItem: (key) => AsyncStorage.getItem(key),
+  setItem: (key, value) => AsyncStorage.setItem(key, value),
+};
+
+MostlyGoodMetrics.configure({
+  apiKey: 'mgm_proj_your_api_key',
+  experimentStorage,
+});
+```
+
+Async adapters are fully supported - cache hydration completes before `ready()` resolves.
 
 ## Automatic Behavior
 

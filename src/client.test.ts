@@ -1,6 +1,12 @@
 import { MostlyGoodMetrics } from './client';
 import { InMemoryEventStorage } from './storage';
-import { INetworkClient, MGMEventsPayload, ResolvedConfiguration, SendResult } from './types';
+import {
+  IExperimentStorage,
+  INetworkClient,
+  MGMEventsPayload,
+  ResolvedConfiguration,
+  SendResult,
+} from './types';
 
 class MockNetworkClient implements INetworkClient {
   public sentPayloads: MGMEventsPayload[] = [];
@@ -1280,6 +1286,499 @@ describe('MostlyGoodMetrics', () => {
 
       // Should not trigger another fetch
       expect(global.fetch).toHaveBeenCalledTimes(callCount);
+    });
+  });
+
+  describe('experiments contract (MGM-31)', () => {
+    let originalFetch: typeof global.fetch;
+
+    const CACHE_KEY = 'mgm_experiment_variants';
+    const EXPOSURES_KEY = 'mgm_experiment_exposures';
+    const ANON_ID = 'anon-mgm31';
+    const HOUR_MS = 60 * 60 * 1000;
+
+    const mockFetch = (assignedVariants: Record<string, string>): jest.Mock => {
+      const mock = jest.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ assigned_variants: assignedVariants }),
+      });
+      global.fetch = mock as unknown as typeof global.fetch;
+      return mock;
+    };
+
+    // Returns a resolve function for a fetch that stays in flight until called.
+    const mockDeferredFetch = (assignedVariants: Record<string, string>): (() => void) => {
+      let resolveFn!: () => void;
+      const promise = new Promise((resolve) => {
+        resolveFn = () =>
+          resolve({
+            ok: true,
+            json: () => Promise.resolve({ assigned_variants: assignedVariants }),
+          });
+      });
+      global.fetch = jest.fn().mockReturnValue(promise) as unknown as typeof global.fetch;
+      return resolveFn;
+    };
+
+    const seedCache = (variants: Record<string, string>, fetchedAt: number, userId = ANON_ID) => {
+      localStorage.setItem(CACHE_KEY, JSON.stringify({ userId, variants, fetchedAt }));
+    };
+
+    const configureSDK = (overrides: Record<string, unknown> = {}) =>
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+        anonymousId: ANON_ID,
+        ...overrides,
+      });
+
+    const exposureEvents = async (eventStorage: InMemoryEventStorage) => {
+      const events = await eventStorage.fetchEvents(100);
+      return events.filter((e) => e.name === '$experiment_exposure');
+    };
+
+    const tick = (ms = 15) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    beforeEach(() => {
+      originalFetch = global.fetch;
+      // Full clean slate: persisted user id, experiment cache, exposure flags
+      localStorage.clear();
+    });
+
+    afterEach(() => {
+      global.fetch = originalFetch;
+      MostlyGoodMetrics.reset();
+      localStorage.clear();
+    });
+
+    describe('getVariant fallback parameter', () => {
+      it('should return fallback before experiments are loaded', () => {
+        // Fetch never resolves
+        global.fetch = jest
+          .fn()
+          .mockImplementation(() => new Promise(() => {})) as unknown as typeof global.fetch;
+
+        configureSDK();
+
+        expect(MostlyGoodMetrics.getVariant('button-color', 'control')).toBe('control');
+        expect(MostlyGoodMetrics.getVariant('button-color')).toBeNull();
+      });
+
+      it('should return fallback for unknown experiment after load', async () => {
+        mockFetch({});
+        configureSDK();
+        await MostlyGoodMetrics.ready();
+
+        expect(MostlyGoodMetrics.getVariant('nonexistent', 'b')).toBe('b');
+        expect(MostlyGoodMetrics.getVariant('nonexistent')).toBeNull();
+      });
+
+      it('should return fallback when SDK is not configured', () => {
+        expect(MostlyGoodMetrics.getVariant('button-color', 'control')).toBe('control');
+      });
+
+      it('should ignore fallback when a variant is assigned', async () => {
+        mockFetch({ 'button-color': 'a' });
+        configureSDK();
+        await MostlyGoodMetrics.ready();
+
+        expect(MostlyGoodMetrics.getVariant('button-color', 'control')).toBe('a');
+      });
+    });
+
+    describe('$experiment_exposure event', () => {
+      it('should track exposure exactly once per (experiment, variant) with correct properties', async () => {
+        mockFetch({ 'checkout-flow': 'treatment' });
+        configureSDK();
+        await MostlyGoodMetrics.ready();
+
+        MostlyGoodMetrics.getVariant('checkout-flow');
+        MostlyGoodMetrics.getVariant('checkout-flow');
+        MostlyGoodMetrics.getVariant('checkout-flow');
+        await tick();
+
+        const exposures = await exposureEvents(storage);
+        expect(exposures).toHaveLength(1);
+        expect(exposures[0].properties?.$experiment_name).toBe('checkout-flow');
+        expect(exposures[0].properties?.$variant).toBe('treatment');
+      });
+
+      it('should not re-track exposure across simulated restarts (persisted dedup)', async () => {
+        mockFetch({ 'sticky-exp': 'a' });
+        configureSDK();
+        await MostlyGoodMetrics.ready();
+
+        MostlyGoodMetrics.getVariant('sticky-exp');
+        await tick();
+        expect(await exposureEvents(storage)).toHaveLength(1);
+        expect(localStorage.getItem(EXPOSURES_KEY)).toContain('sticky-exp');
+
+        // Simulated restart: new instance + new event storage, same localStorage
+        MostlyGoodMetrics.reset();
+        const storageAfterRestart = new InMemoryEventStorage(100);
+        configureSDK({ storage: storageAfterRestart });
+        await MostlyGoodMetrics.ready();
+
+        expect(MostlyGoodMetrics.getVariant('sticky-exp')).toBe('a');
+        MostlyGoodMetrics.getVariant('sticky-exp');
+        await tick();
+
+        expect(await exposureEvents(storageAfterRestart)).toHaveLength(0);
+      });
+
+      it('should track a new exposure when the variant changes', async () => {
+        mockFetch({ exp: 'a' });
+        configureSDK();
+        await MostlyGoodMetrics.ready();
+
+        MostlyGoodMetrics.getVariant('exp');
+        await tick();
+
+        // Server reassigns to 'b' after identify
+        mockFetch({ exp: 'b' });
+        MostlyGoodMetrics.identify('mgm31-variant-change-user');
+        await MostlyGoodMetrics.ready();
+
+        MostlyGoodMetrics.getVariant('exp');
+        MostlyGoodMetrics.getVariant('exp');
+        await tick();
+
+        const exposures = await exposureEvents(storage);
+        expect(exposures).toHaveLength(2);
+        expect(exposures[1].properties?.$variant).toBe('b');
+      });
+
+      it('should still set the super property on getVariant hit', async () => {
+        mockFetch({ 'button-color': 'a' });
+        configureSDK();
+        await MostlyGoodMetrics.ready();
+
+        MostlyGoodMetrics.getVariant('button-color');
+        expect(MostlyGoodMetrics.getSuperProperties().$experiment_button_color).toBe('a');
+      });
+    });
+
+    describe('cache policy (no TTL, stale-while-revalidate)', () => {
+      it('should serve cached variants after 25 hours (no expiry)', async () => {
+        seedCache({ 'old-exp': 'cached' }, Date.now() - 25 * HOUR_MS);
+
+        // Refetch stays in flight - cached value must be served regardless
+        const resolveFetch = mockDeferredFetch({ 'old-exp': 'fresh' });
+
+        configureSDK();
+        await MostlyGoodMetrics.ready();
+
+        // Served synchronously from cache while refetch is in flight
+        expect(MostlyGoodMetrics.getVariant('old-exp')).toBe('cached');
+        // Stale cache (>1h) triggered a background revalidation
+        expect(global.fetch).toHaveBeenCalledTimes(1);
+
+        // Still serving cached value while the request is pending
+        expect(MostlyGoodMetrics.getVariant('old-exp')).toBe('cached');
+
+        resolveFetch();
+        await tick();
+
+        // Atomically swapped to the fresh value once the response arrived
+        expect(MostlyGoodMetrics.getVariant('old-exp')).toBe('fresh');
+      });
+
+      it('should resolve ready() from cache without waiting for the background refetch', async () => {
+        seedCache({ 'swr-exp': 'v1' }, Date.now() - 2 * HOUR_MS);
+        mockDeferredFetch({ 'swr-exp': 'v2' }); // never resolved
+
+        configureSDK();
+
+        // ready() must resolve even though the refetch never completes
+        await MostlyGoodMetrics.ready();
+        expect(MostlyGoodMetrics.getVariant('swr-exp')).toBe('v1');
+      });
+
+      it('should throttle background refetch to once per hour', async () => {
+        seedCache({ 'fresh-exp': 'a' }, Date.now() - 30 * 60 * 1000); // 30 minutes old
+        const fetchMock = mockFetch({ 'fresh-exp': 'b' });
+
+        configureSDK();
+        await MostlyGoodMetrics.ready();
+        await tick();
+
+        // Cache is fresher than 1 hour - no refetch
+        expect(fetchMock).not.toHaveBeenCalled();
+        expect(MostlyGoodMetrics.getVariant('fresh-exp')).toBe('a');
+      });
+
+      it('should refetch in background when cache is older than an hour', async () => {
+        seedCache({ 'stale-exp': 'a' }, Date.now() - 2 * HOUR_MS);
+        const fetchMock = mockFetch({ 'stale-exp': 'b' });
+
+        configureSDK();
+        await MostlyGoodMetrics.ready();
+        await tick();
+
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(MostlyGoodMetrics.getVariant('stale-exp')).toBe('b');
+
+        // The refreshed cache persists the new last-fetch timestamp
+        const cached = JSON.parse(localStorage.getItem(CACHE_KEY) ?? '{}') as {
+          variants: Record<string, string>;
+          fetchedAt: number;
+        };
+        expect(cached.variants['stale-exp']).toBe('b');
+        expect(Date.now() - cached.fetchedAt).toBeLessThan(5000);
+      });
+    });
+
+    describe('identify() refetch behavior', () => {
+      it('should keep serving old variants until refetch responds, then swap atomically', async () => {
+        mockFetch({ exp: 'anon-variant' });
+        configureSDK();
+        await MostlyGoodMetrics.ready();
+        expect(MostlyGoodMetrics.getVariant('exp')).toBe('anon-variant');
+
+        // Refetch for the identified user stays in flight
+        const resolveFetch = mockDeferredFetch({ exp: 'new-variant' });
+        MostlyGoodMetrics.identify('mgm31-swap-user');
+
+        // Old variants are never cleared to null mid-session
+        expect(MostlyGoodMetrics.getVariant('exp')).toBe('anon-variant');
+        await tick();
+        expect(MostlyGoodMetrics.getVariant('exp')).toBe('anon-variant');
+
+        resolveFetch();
+        await MostlyGoodMetrics.ready();
+
+        expect(MostlyGoodMetrics.getVariant('exp')).toBe('new-variant');
+      });
+
+      it('should include anonymous_id alongside user_id on post-identify refetch', async () => {
+        mockFetch({ exp: 'anon-variant' });
+        configureSDK();
+        await MostlyGoodMetrics.ready();
+
+        // Initial anonymous fetch should not include anonymous_id
+        expect(global.fetch).toHaveBeenCalledWith(
+          expect.not.stringContaining('anonymous_id='),
+          expect.any(Object)
+        );
+
+        const fetchMock = mockFetch({ exp: 'new-variant' });
+        MostlyGoodMetrics.identify('mgm31-anon-param-user');
+        await MostlyGoodMetrics.ready();
+
+        expect(fetchMock).toHaveBeenCalledWith(
+          expect.stringContaining(`user_id=${encodeURIComponent('mgm31-anon-param-user')}`),
+          expect.any(Object)
+        );
+        expect(fetchMock).toHaveBeenCalledWith(
+          expect.stringContaining(`anonymous_id=${encodeURIComponent(ANON_ID)}`),
+          expect.any(Object)
+        );
+      });
+
+      it('should keep old variants when the post-identify refetch fails', async () => {
+        mockFetch({ exp: 'anon-variant' });
+        configureSDK();
+        await MostlyGoodMetrics.ready();
+
+        global.fetch = jest
+          .fn()
+          .mockRejectedValue(new Error('Network error')) as unknown as typeof global.fetch;
+        MostlyGoodMetrics.identify('mgm31-fail-user');
+        await MostlyGoodMetrics.ready();
+
+        expect(MostlyGoodMetrics.getVariant('exp')).toBe('anon-variant');
+      });
+    });
+
+    describe('pluggable experiment storage', () => {
+      class FakeAsyncStorage implements IExperimentStorage {
+        public store: Record<string, string> = {};
+
+        async getItem(key: string): Promise<string | null> {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          return this.store[key] ?? null;
+        }
+
+        async setItem(key: string, value: string): Promise<void> {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          this.store[key] = value;
+        }
+      }
+
+      it('should hydrate from an async adapter before ready() resolves', async () => {
+        const adapter = new FakeAsyncStorage();
+        adapter.store[CACHE_KEY] = JSON.stringify({
+          userId: ANON_ID,
+          variants: { 'rn-exp': 'b' },
+          fetchedAt: Date.now(),
+        });
+
+        const fetchMock = mockFetch({ 'rn-exp': 'server' });
+
+        configureSDK({ experimentStorage: adapter });
+        await MostlyGoodMetrics.ready();
+
+        // Hydrated from the async adapter, no network fetch needed (fresh cache)
+        expect(MostlyGoodMetrics.getVariant('rn-exp')).toBe('b');
+        expect(fetchMock).not.toHaveBeenCalled();
+      });
+
+      it('should persist cache and exposure flags through the adapter', async () => {
+        const adapter = new FakeAsyncStorage();
+        mockFetch({ 'rn-exp': 'a' });
+
+        configureSDK({ experimentStorage: adapter });
+        await MostlyGoodMetrics.ready();
+        await tick();
+
+        // Variants cached through the adapter, not localStorage
+        expect(adapter.store[CACHE_KEY]).toContain('rn-exp');
+        expect(localStorage.getItem(CACHE_KEY)).toBeNull();
+
+        MostlyGoodMetrics.getVariant('rn-exp');
+        await tick();
+
+        // Exposure dedup flags persisted through the adapter
+        expect(adapter.store[EXPOSURES_KEY]).toContain('rn-exp');
+
+        // Exposure dedup survives a restart with the same adapter
+        MostlyGoodMetrics.reset();
+        const storageAfterRestart = new InMemoryEventStorage(100);
+        configureSDK({ experimentStorage: adapter, storage: storageAfterRestart });
+        await MostlyGoodMetrics.ready();
+
+        MostlyGoodMetrics.getVariant('rn-exp');
+        await tick();
+        expect(await exposureEvents(storageAfterRestart)).toHaveLength(0);
+      });
+    });
+
+    describe('ready() timeout', () => {
+      // Flush pending promise chains without advancing timers
+      const flushMicrotasks = async () => {
+        for (let i = 0; i < 25; i++) {
+          await Promise.resolve();
+        }
+      };
+
+      beforeEach(() => {
+        jest.useFakeTimers();
+      });
+
+      afterEach(() => {
+        jest.useRealTimers();
+      });
+
+      it('should resolve after the default 5s timeout when the network hangs', async () => {
+        // Fetch never settles (cold cache + hanging network)
+        global.fetch = jest
+          .fn()
+          .mockImplementation(() => new Promise(() => {})) as unknown as typeof global.fetch;
+
+        configureSDK();
+
+        let resolved = false;
+        const ready = MostlyGoodMetrics.ready().then(() => {
+          resolved = true;
+        });
+
+        await jest.advanceTimersByTimeAsync(4999);
+        expect(resolved).toBe(false);
+
+        await jest.advanceTimersByTimeAsync(1);
+        await ready;
+        expect(resolved).toBe(true);
+      });
+
+      it('should resolve as soon as experiments load, before the timeout', async () => {
+        mockFetch({ 'fast-exp': 'a' });
+        configureSDK();
+
+        let resolved = false;
+        void MostlyGoodMetrics.ready().then(() => {
+          resolved = true;
+        });
+
+        // No timers advanced - resolution comes from the fetch settling
+        await flushMicrotasks();
+        expect(resolved).toBe(true);
+        expect(MostlyGoodMetrics.getVariant('fast-exp')).toBe('a');
+      });
+
+      it('should keep working with no arguments (backwards compatible)', async () => {
+        mockFetch({ 'compat-exp': 'b' });
+        configureSDK();
+
+        await MostlyGoodMetrics.ready();
+        expect(MostlyGoodMetrics.getVariant('compat-exp')).toBe('b');
+      });
+
+      it('should honor a custom timeoutMs', async () => {
+        global.fetch = jest
+          .fn()
+          .mockImplementation(() => new Promise(() => {})) as unknown as typeof global.fetch;
+
+        configureSDK();
+
+        let resolved = false;
+        void MostlyGoodMetrics.ready(1000).then(() => {
+          resolved = true;
+        });
+
+        await jest.advanceTimersByTimeAsync(999);
+        expect(resolved).toBe(false);
+
+        await jest.advanceTimersByTimeAsync(1);
+        await flushMicrotasks();
+        expect(resolved).toBe(true);
+      });
+
+      it('should still apply variants from a fetch that completes after the timeout', async () => {
+        const resolveFetch = mockDeferredFetch({ 'late-exp': 'b' });
+        configureSDK();
+
+        const ready = MostlyGoodMetrics.ready();
+        await jest.advanceTimersByTimeAsync(5000);
+        await ready; // resolved by the timeout, not the fetch
+
+        // Fetch still in flight - no variant yet
+        expect(MostlyGoodMetrics.getVariant('late-exp')).toBeNull();
+
+        // Late response arrives after the timeout
+        resolveFetch();
+        await flushMicrotasks();
+
+        // Variants are atomically applied and persisted anyway
+        expect(MostlyGoodMetrics.getVariant('late-exp')).toBe('b');
+        expect(localStorage.getItem(CACHE_KEY)).toContain('late-exp');
+      });
+
+      it('should abort a hung experiments fetch so the load always settles', async () => {
+        const fetchMock = jest.fn().mockImplementation(
+          (_url: string, options: { signal: AbortSignal }) =>
+            new Promise((_resolve, reject) => {
+              options.signal.addEventListener('abort', () => reject(new Error('Aborted')));
+            })
+        );
+        global.fetch = fetchMock as unknown as typeof global.fetch;
+
+        configureSDK();
+
+        let resolved = false;
+        void MostlyGoodMetrics.ready(120000).then(() => {
+          resolved = true;
+        });
+
+        // At the 60s fetch timeout the request is aborted, the load settles,
+        // and ready() resolves well before its own 120s timeout.
+        await jest.advanceTimersByTimeAsync(60000);
+        await flushMicrotasks();
+
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(resolved).toBe(true);
+      });
     });
   });
 });
