@@ -36,6 +36,8 @@ const FLUSH_DELAY_MS = 100; // Delay between batch sends
 const EXPERIMENTS_CACHE_KEY = 'mgm_experiment_variants';
 const EXPERIMENT_EXPOSURES_KEY = 'mgm_experiment_exposures';
 const EXPERIMENTS_REFETCH_INTERVAL_MS = 60 * 60 * 1000; // Background revalidation at most hourly
+const EXPERIMENTS_FETCH_TIMEOUT_MS = 60 * 1000; // Abort hung experiments fetches so they always settle
+const READY_DEFAULT_TIMEOUT_MS = 5000; // Default ready() timeout, unified across all MGM SDKs
 
 /**
  * Main client for MostlyGoodMetrics.
@@ -252,11 +254,14 @@ export class MostlyGoodMetrics {
   }
 
   /**
-   * Returns a promise that resolves when experiments have been loaded.
-   * Useful for waiting before calling getVariant() to ensure server-side experiments are available.
+   * Returns a promise that resolves when experiments have been loaded, or
+   * after `timeoutMs` (default 5000) elapses - whichever comes first.
+   * Never rejects. Useful for waiting before calling getVariant() to ensure
+   * server-side experiments are available without blocking app startup on a
+   * hanging network.
    */
-  static ready(): Promise<void> {
-    return MostlyGoodMetrics.instance?.ready() ?? Promise.resolve();
+  static ready(timeoutMs: number = READY_DEFAULT_TIMEOUT_MS): Promise<void> {
+    return MostlyGoodMetrics.instance?.ready(timeoutMs) ?? Promise.resolve();
   }
 
   // =====================================================
@@ -587,11 +592,22 @@ export class MostlyGoodMetrics {
   }
 
   /**
-   * Returns a promise that resolves when experiments have been loaded.
-   * Useful for waiting before calling getVariant() to ensure server-side experiments are available.
+   * Returns a promise that resolves when experiments have been loaded, or
+   * after `timeoutMs` (default 5000) elapses - whichever comes first.
+   * Never rejects.
+   *
+   * If the timeout fires first, getVariant() keeps returning fallbacks until
+   * the in-flight fetch settles; a late response is still applied atomically,
+   * so variants become available to subsequent calls.
    */
-  ready(): Promise<void> {
-    return this.experimentsReadyPromise;
+  ready(timeoutMs: number = READY_DEFAULT_TIMEOUT_MS): Promise<void> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, timeoutMs);
+      void this.experimentsReadyPromise.then(() => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
   }
 
   /**
@@ -857,6 +873,10 @@ export class MostlyGoodMetrics {
    * Fetch experiments from the server and atomically swap in the response.
    * Called on initialization (when no fresh cache exists) and after identify().
    * On failure, previously loaded variants keep being served.
+   *
+   * The request is aborted after EXPERIMENTS_FETCH_TIMEOUT_MS so it is
+   * guaranteed to settle. A response that arrives after a ready() timeout is
+   * still applied atomically - late variants are better than none.
    */
   private async fetchExperiments(): Promise<void> {
     const currentUserId = this.userId ?? this.anonymousIdValue;
@@ -869,6 +889,11 @@ export class MostlyGoodMetrics {
       url += `&anonymous_id=${encodeURIComponent(this.anonymousIdValue)}`;
     }
 
+    // Abort the request if it hangs so this promise is guaranteed to settle
+    // (and markExperimentsReady() is guaranteed to run).
+    const abortController = new AbortController();
+    const abortTimer = setTimeout(() => abortController.abort(), EXPERIMENTS_FETCH_TIMEOUT_MS);
+
     try {
       logger.debug('Fetching experiments...');
 
@@ -878,6 +903,7 @@ export class MostlyGoodMetrics {
           Authorization: `Bearer ${this.config.apiKey}`,
           'Content-Type': 'application/json',
         },
+        signal: abortController.signal,
       });
 
       if (!response.ok) {
@@ -897,6 +923,7 @@ export class MostlyGoodMetrics {
     } catch (e) {
       logger.warn('Failed to fetch experiments', e);
     } finally {
+      clearTimeout(abortTimer);
       this.markExperimentsReady();
     }
   }

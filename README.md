@@ -289,7 +289,11 @@ console.log(`${count} events pending`);
 Variants are assigned server-side (`GET /v1/experiments`) so the same user always gets the same variant for the same experiment.
 
 ```typescript
-// Wait for experiments to load (resolves immediately if cached)
+// Wait for experiments to load (resolves immediately if cached).
+// Resolves after 5 seconds at the latest so a hanging network never
+// blocks startup - pass a custom timeout with ready(timeoutMs).
+// ready() never rejects; if it times out, getVariant() returns fallbacks
+// until the in-flight fetch completes (a late response is still applied).
 await MostlyGoodMetrics.ready();
 
 // Get the assigned variant, with an optional fallback for when the
@@ -306,6 +310,7 @@ if (variant === 'treatment') {
 Assigned variants are cached locally per user and **never expire**:
 
 - Cached variants are served synchronously as soon as they are hydrated; `ready()` resolves without waiting for the network.
+- On a cold cache, `ready(timeoutMs = 5000)` resolves when the first experiments load settles or the timeout elapses, whichever comes first (it never rejects). The underlying request is aborted after 60 seconds so it always settles; a response arriving after a `ready()` timeout is still applied atomically.
 - A background refetch keeps assignments up to date, throttled to at most once per hour (the last-fetch timestamp is persisted).
 - On `identify()` with a changed user ID, the SDK keeps serving the current in-memory variants, refetches immediately (passing `anonymous_id` alongside `user_id` so the server can alias pre-identify assignments), and atomically swaps in the response. Variants are never cleared to null mid-session.
 

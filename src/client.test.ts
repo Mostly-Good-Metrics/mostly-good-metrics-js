@@ -1654,5 +1654,131 @@ describe('MostlyGoodMetrics', () => {
         expect(await exposureEvents(storageAfterRestart)).toHaveLength(0);
       });
     });
+
+    describe('ready() timeout', () => {
+      // Flush pending promise chains without advancing timers
+      const flushMicrotasks = async () => {
+        for (let i = 0; i < 25; i++) {
+          await Promise.resolve();
+        }
+      };
+
+      beforeEach(() => {
+        jest.useFakeTimers();
+      });
+
+      afterEach(() => {
+        jest.useRealTimers();
+      });
+
+      it('should resolve after the default 5s timeout when the network hangs', async () => {
+        // Fetch never settles (cold cache + hanging network)
+        global.fetch = jest
+          .fn()
+          .mockImplementation(() => new Promise(() => {})) as unknown as typeof global.fetch;
+
+        configureSDK();
+
+        let resolved = false;
+        const ready = MostlyGoodMetrics.ready().then(() => {
+          resolved = true;
+        });
+
+        await jest.advanceTimersByTimeAsync(4999);
+        expect(resolved).toBe(false);
+
+        await jest.advanceTimersByTimeAsync(1);
+        await ready;
+        expect(resolved).toBe(true);
+      });
+
+      it('should resolve as soon as experiments load, before the timeout', async () => {
+        mockFetch({ 'fast-exp': 'a' });
+        configureSDK();
+
+        let resolved = false;
+        void MostlyGoodMetrics.ready().then(() => {
+          resolved = true;
+        });
+
+        // No timers advanced - resolution comes from the fetch settling
+        await flushMicrotasks();
+        expect(resolved).toBe(true);
+        expect(MostlyGoodMetrics.getVariant('fast-exp')).toBe('a');
+      });
+
+      it('should keep working with no arguments (backwards compatible)', async () => {
+        mockFetch({ 'compat-exp': 'b' });
+        configureSDK();
+
+        await MostlyGoodMetrics.ready();
+        expect(MostlyGoodMetrics.getVariant('compat-exp')).toBe('b');
+      });
+
+      it('should honor a custom timeoutMs', async () => {
+        global.fetch = jest
+          .fn()
+          .mockImplementation(() => new Promise(() => {})) as unknown as typeof global.fetch;
+
+        configureSDK();
+
+        let resolved = false;
+        void MostlyGoodMetrics.ready(1000).then(() => {
+          resolved = true;
+        });
+
+        await jest.advanceTimersByTimeAsync(999);
+        expect(resolved).toBe(false);
+
+        await jest.advanceTimersByTimeAsync(1);
+        await flushMicrotasks();
+        expect(resolved).toBe(true);
+      });
+
+      it('should still apply variants from a fetch that completes after the timeout', async () => {
+        const resolveFetch = mockDeferredFetch({ 'late-exp': 'b' });
+        configureSDK();
+
+        const ready = MostlyGoodMetrics.ready();
+        await jest.advanceTimersByTimeAsync(5000);
+        await ready; // resolved by the timeout, not the fetch
+
+        // Fetch still in flight - no variant yet
+        expect(MostlyGoodMetrics.getVariant('late-exp')).toBeNull();
+
+        // Late response arrives after the timeout
+        resolveFetch();
+        await flushMicrotasks();
+
+        // Variants are atomically applied and persisted anyway
+        expect(MostlyGoodMetrics.getVariant('late-exp')).toBe('b');
+        expect(localStorage.getItem(CACHE_KEY)).toContain('late-exp');
+      });
+
+      it('should abort a hung experiments fetch so the load always settles', async () => {
+        const fetchMock = jest.fn().mockImplementation(
+          (_url: string, options: { signal: AbortSignal }) =>
+            new Promise((_resolve, reject) => {
+              options.signal.addEventListener('abort', () => reject(new Error('Aborted')));
+            })
+        );
+        global.fetch = fetchMock as unknown as typeof global.fetch;
+
+        configureSDK();
+
+        let resolved = false;
+        void MostlyGoodMetrics.ready(120000).then(() => {
+          resolved = true;
+        });
+
+        // At the 60s fetch timeout the request is aborted, the load settles,
+        // and ready() resolves well before its own 120s timeout.
+        await jest.advanceTimersByTimeAsync(60000);
+        await flushMicrotasks();
+
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(resolved).toBe(true);
+      });
+    });
   });
 });

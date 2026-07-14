@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file.
 - Automatic `$experiment_exposure` event on the first `getVariant()` hit per (user, experiment, variant), with properties `$experiment_name` (the raw experiment name) and `$variant`. Dedup flags are persisted so exposures are not re-tracked across restarts. The `$experiment_{name}` super property behavior is unchanged. (MGM-31)
 - Pluggable `experimentStorage` configuration option with a new `IExperimentStorage` interface (async-capable) for the experiments cache and exposure flags. Defaults to localStorage; React Native apps can inject AsyncStorage. Exported `LocalStorageExperimentStorage`, `InMemoryExperimentStorage`, and `createDefaultExperimentStorage`. (MGM-31)
 - Post-identify experiment refetches now include `anonymous_id` alongside `user_id` in `GET /v1/experiments` so the server can alias pre-identify assignments. (MGM-28/MGM-31)
+- `ready(timeoutMs?)` now accepts an optional timeout (default 5000ms, unified across all MGM SDKs) and resolves when experiments load or the timeout elapses, whichever comes first - it never rejects, so a hanging network on a cold cache no longer blocks startup forever. The experiments fetch is aborted after 60s so it always settles; a late response arriving after a `ready()` timeout is still applied atomically. No-argument calls keep working. (MGM-31)
 
 ### Changed
 
