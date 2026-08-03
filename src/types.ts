@@ -134,6 +134,25 @@ export interface MGMConfiguration {
   experimentStorage?: IExperimentStorage;
 
   /**
+   * How experiment variants are assigned:
+   * - `'server'` (default): the server assigns variants per user
+   *   (`GET /v1/experiments?user_id=...`).
+   * - `'local'`: experiment configurations are loaded without sending any
+   *   user identifier, and variants are assigned on-device via deterministic
+   *   hashing. See `localExperiments` to skip the network entirely.
+   * @default 'server'
+   */
+  experimentMode?: ExperimentMode;
+
+  /**
+   * Inline experiment configurations for `experimentMode: 'local'`.
+   * When provided, the SDK performs no experiments network request at all -
+   * variants are assigned on-device from these configurations.
+   * Ignored in `'server'` mode.
+   */
+  localExperiments?: MGMExperimentConfig[];
+
+  /**
    * Callback invoked when a network error occurs.
    * Useful for reporting errors to external services like Sentry.
    * @param error The error that occurred
@@ -154,12 +173,14 @@ export interface ResolvedConfiguration extends Required<
     | 'anonymousId'
     | 'cookieDomain'
     | 'disableCookies'
+    | 'localExperiments'
   >
 > {
   storage?: IEventStorage;
   networkClient?: INetworkClient;
   experimentStorage?: IExperimentStorage;
   onError?: (error: MGMError) => void;
+  localExperiments?: MGMExperimentConfig[];
 }
 
 /**
@@ -444,6 +465,60 @@ export interface UserProfile {
 }
 
 /**
+ * How experiment variants are assigned.
+ * @see MGMConfiguration.experimentMode
+ */
+export type ExperimentMode = 'server' | 'local';
+
+/**
+ * An experiment configuration used for local (on-device) enrollment.
+ */
+export interface MGMExperimentConfig {
+  /**
+   * The experiment UUID. Used as the stable bucketing key - it must match the
+   * server-side experiment ID so on-device assignments line up across SDKs.
+   */
+  id: string;
+
+  /**
+   * The human-readable experiment name (e.g., "button-color").
+   * This is the key passed to getVariant() and sent on exposure events.
+   */
+  name: string;
+
+  /**
+   * The ordered list of variants (e.g., ["control", "treatment"]).
+   * Order matters: the bucketing algorithm indexes into this array.
+   */
+  variants: string[];
+}
+
+/**
+ * Response from the experiment configs endpoint
+ * (GET /v1/experiments/configs) used in local enrollment mode.
+ * Contains no user-specific data.
+ */
+export interface ExperimentConfigsResponse {
+  experiments: MGMExperimentConfig[];
+}
+
+/**
+ * Cached experiment configurations stored by the experiment storage adapter
+ * in local enrollment mode.
+ */
+export interface CachedExperimentConfigs {
+  /**
+   * The experiment configurations.
+   */
+  experiments: MGMExperimentConfig[];
+
+  /**
+   * Timestamp when the cache was created (ms since epoch).
+   */
+  fetchedAt: number;
+}
+
+/**
  * An experiment configuration from the server.
  */
 export interface Experiment {
@@ -514,6 +589,7 @@ export const DefaultConfiguration = {
   maxStoredEvents: 10000,
   enableDebugLogging: false,
   trackAppLifecycleEvents: false,
+  experimentMode: 'server' as ExperimentMode,
 } as const;
 
 /**

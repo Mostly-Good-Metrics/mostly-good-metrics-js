@@ -1,9 +1,12 @@
 import { logger, setDebugLogging } from './logger';
 import { createDefaultNetworkClient } from './network';
 import { createDefaultExperimentStorage, createDefaultStorage, persistence } from './storage';
+import { computeExperimentBucket } from './sha256';
 import {
+  CachedExperimentConfigs,
   CachedExperimentVariants,
   EventProperties,
+  ExperimentConfigsResponse,
   ExperimentsResponse,
   IEventStorage,
   IExperimentStorage,
@@ -12,6 +15,7 @@ import {
   MGMEvent,
   MGMEventContext,
   MGMEventsPayload,
+  MGMExperimentConfig,
   ResolvedConfiguration,
   SystemEvents,
   SystemProperties,
@@ -35,6 +39,14 @@ import {
 const FLUSH_DELAY_MS = 100; // Delay between batch sends
 const EXPERIMENTS_CACHE_KEY = 'mgm_experiment_variants';
 const EXPERIMENT_EXPOSURES_KEY = 'mgm_experiment_exposures';
+// Local enrollment mode: cached experiment configs and sticky on-device
+// assignments (keyed by experiment UUID).
+// TODO(privacy-controls merge): when feat/privacy-controls lands,
+// resetAnonymousId() and resetIdentity({ clearAnonymousId: true }) must also
+// clear LOCAL_ASSIGNMENTS_KEY (and the in-memory localAssignments map) so a
+// forgotten user is re-bucketed under their new identity.
+const LOCAL_EXPERIMENT_CONFIGS_KEY = 'mgm_local_experiment_configs';
+const LOCAL_ASSIGNMENTS_KEY = 'mgm_local_experiment_assignments';
 const EXPERIMENTS_REFETCH_INTERVAL_MS = 60 * 60 * 1000; // Background revalidation at most hourly
 const EXPERIMENTS_FETCH_TIMEOUT_MS = 60 * 1000; // Abort hung experiments fetches so they always settle
 const READY_DEFAULT_TIMEOUT_MS = 5000; // Default ready() timeout, unified across all MGM SDKs
@@ -57,6 +69,8 @@ export class MostlyGoodMetrics {
 
   // A/B testing state
   private assignedVariants: Record<string, string> = {}; // Server-assigned variants
+  private localExperimentsByName: Record<string, MGMExperimentConfig> = {}; // Local mode: name -> config
+  private localAssignments: Record<string, string> = {}; // Local mode: experiment UUID -> sticky variant
   private experimentStorage: IExperimentStorage;
   private experimentsLoaded = false;
   private experimentsReadyResolve: (() => void) | null = null;
@@ -391,7 +405,11 @@ export class MostlyGoodMetrics {
     // then they are swapped atomically - never cleared to null mid-session.
     // The refetch includes anonymous_id so the server can honor the
     // "identified wins" aliasing strategy.
-    if (previousUserId !== userId) {
+    //
+    // Local enrollment mode: nothing to do. Experiment configs are
+    // identity-independent, and existing on-device assignments are sticky -
+    // identify() never re-buckets a user.
+    if (previousUserId !== userId && this.config.experimentMode === 'server') {
       logger.debug('User identity changed, refetching experiments');
       this.resetExperimentsReadyPromise();
       void this.fetchExperiments();
@@ -565,8 +583,11 @@ export class MostlyGoodMetrics {
       return fallback;
     }
 
-    // Check if we have a server-assigned variant for this experiment
-    const variant = this.assignedVariants[experimentName];
+    // Resolve the variant: server-assigned, or bucketed on-device in local mode
+    const variant =
+      this.config.experimentMode === 'local'
+        ? this.resolveLocalVariant(experimentName)
+        : this.assignedVariants[experimentName];
 
     if (variant) {
       // Store as super property so it's attached to all events
@@ -576,7 +597,7 @@ export class MostlyGoodMetrics {
       // Track exposure once per (user, experiment, variant)
       this.trackExposureIfNeeded(experimentName, variant);
 
-      logger.debug(`Using server-assigned variant '${variant}' for experiment '${experimentName}'`);
+      logger.debug(`Using variant '${variant}' for experiment '${experimentName}'`);
       return variant;
     }
 
@@ -841,6 +862,10 @@ export class MostlyGoodMetrics {
    *    when the fetch settles, even on failure).
    */
   private async initializeExperiments(): Promise<void> {
+    if (this.config.experimentMode === 'local') {
+      return this.initializeLocalExperiments();
+    }
+
     const currentUserId = this.userId ?? this.anonymousIdValue;
 
     // Hydrate exposure flags first so exposure dedup survives restarts
@@ -925,6 +950,222 @@ export class MostlyGoodMetrics {
     } finally {
       clearTimeout(abortTimer);
       this.markExperimentsReady();
+    }
+  }
+
+  // =====================================================
+  // Local enrollment mode (experimentMode: 'local')
+  // =====================================================
+
+  /**
+   * Initialize experiments in local enrollment mode.
+   *
+   * Instead of asking the server for per-user assignments, the SDK loads
+   * identity-free experiment *configurations* and assigns variants on-device
+   * via deterministic hashing (see resolveLocalVariant). No user identifier
+   * ever leaves the device for experiment enrollment.
+   *
+   * Configuration sources, in order:
+   * 1. Inline `localExperiments` from the configuration - zero network.
+   * 2. Cached configs from the experiment storage adapter, served
+   *    immediately and revalidated in the background at most hourly
+   *    (same stale-while-revalidate pattern as server mode).
+   * 3. A fetch of GET /v1/experiments/configs.
+   */
+  private async initializeLocalExperiments(): Promise<void> {
+    // Hydrate exposure flags and sticky assignments so both survive restarts
+    await this.hydrateExposures();
+    await this.hydrateLocalAssignments();
+
+    // Inline configs: no network at all
+    if (this.config.localExperiments) {
+      this.setLocalExperimentConfigs(this.config.localExperiments);
+      logger.debug(`Using ${this.config.localExperiments.length} inline local experiment configs`);
+      this.markExperimentsReady();
+      return;
+    }
+
+    // Cached configs: serve immediately, revalidate in the background
+    const cached = await this.loadLocalConfigsCache();
+    if (cached) {
+      const cacheAge = Date.now() - cached.fetchedAt;
+      logger.debug(
+        `Using cached local experiment configs (age: ${Math.round(cacheAge / 1000 / 60)}min)`
+      );
+      this.setLocalExperimentConfigs(cached.experiments);
+      this.markExperimentsReady();
+
+      if (cacheAge >= EXPERIMENTS_REFETCH_INTERVAL_MS) {
+        logger.debug('Cached local experiment configs are stale, revalidating in background');
+        void this.fetchLocalExperimentConfigs();
+      }
+      return;
+    }
+
+    // No usable cache - fetch from the server
+    await this.fetchLocalExperimentConfigs();
+  }
+
+  /**
+   * Fetch experiment configurations for local enrollment.
+   *
+   * Unlike the server-assignment fetch, this request intentionally carries no
+   * user_id or anonymous_id - that is the privacy point of local mode.
+   * Uses the same auth and abort-timeout behavior as fetchExperiments().
+   */
+  private async fetchLocalExperimentConfigs(): Promise<void> {
+    const url = `${this.config.baseURL}/v1/experiments/configs`;
+
+    const abortController = new AbortController();
+    const abortTimer = setTimeout(() => abortController.abort(), EXPERIMENTS_FETCH_TIMEOUT_MS);
+
+    try {
+      logger.debug('Fetching local experiment configs...');
+
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${this.config.apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        signal: abortController.signal,
+      });
+
+      if (!response.ok) {
+        logger.warn(`Failed to fetch local experiment configs: ${response.status}`);
+        return;
+      }
+
+      const data = (await response.json()) as ExperimentConfigsResponse;
+      const experiments = data.experiments ?? [];
+
+      this.setLocalExperimentConfigs(experiments);
+      await this.saveLocalConfigsCache(experiments);
+
+      logger.debug(`Loaded ${experiments.length} local experiment configs`);
+    } catch (e) {
+      logger.warn('Failed to fetch local experiment configs', e);
+    } finally {
+      clearTimeout(abortTimer);
+      this.markExperimentsReady();
+    }
+  }
+
+  /**
+   * Index experiment configurations by name for getVariant() lookups.
+   */
+  private setLocalExperimentConfigs(configs: MGMExperimentConfig[]): void {
+    const byName: Record<string, MGMExperimentConfig> = {};
+    for (const config of configs) {
+      byName[config.name] = config;
+    }
+    this.localExperimentsByName = byName;
+  }
+
+  /**
+   * Resolve the variant for an experiment via on-device bucketing.
+   *
+   * Algorithm (shared across all MGM SDKs, locked by golden-vector tests):
+   *   bucket  = first 8 bytes of SHA-256(utf8("<experiment_uuid>:<user_id>"))
+   *             as an unsigned big-endian 64-bit integer (BigInt)
+   *   variant = variants[bucket % variants.length]
+   * where user_id is the identified user ID if set, otherwise the anonymous ID.
+   *
+   * Assignments are sticky: the first resolved variant is persisted per
+   * experiment UUID and reused on later calls and restarts - identify() never
+   * re-buckets. A persisted variant is only discarded if it no longer exists
+   * in the experiment's variants list.
+   */
+  private resolveLocalVariant(experimentName: string): string | null {
+    const config = this.localExperimentsByName[experimentName];
+    if (!config || config.variants.length === 0) {
+      return null;
+    }
+
+    // Sticky assignment: reuse the persisted variant for this experiment UUID
+    const existing = this.localAssignments[config.id];
+    if (existing && config.variants.includes(existing)) {
+      return existing;
+    }
+
+    const effectiveUserId = this.userId ?? this.anonymousIdValue;
+    const bucket = computeExperimentBucket(config.id, effectiveUserId);
+    const variant = config.variants[Number(bucket % BigInt(config.variants.length))];
+
+    this.localAssignments[config.id] = variant;
+    void this.persistLocalAssignments();
+
+    logger.debug(
+      `Locally bucketed variant '${variant}' for experiment '${experimentName}' (bucket ${bucket})`
+    );
+    return variant;
+  }
+
+  /**
+   * Hydrate sticky local assignments from the experiment storage adapter.
+   */
+  private async hydrateLocalAssignments(): Promise<void> {
+    try {
+      const raw = await this.experimentStorage.getItem(LOCAL_ASSIGNMENTS_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as unknown;
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          const assignments: Record<string, string> = {};
+          for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+            if (typeof value === 'string') {
+              assignments[key] = value;
+            }
+          }
+          this.localAssignments = assignments;
+        }
+      }
+    } catch (e) {
+      logger.debug('Failed to load local experiment assignments', e);
+    }
+  }
+
+  /**
+   * Persist sticky local assignments via the experiment storage adapter.
+   */
+  private async persistLocalAssignments(): Promise<void> {
+    try {
+      await this.experimentStorage.setItem(
+        LOCAL_ASSIGNMENTS_KEY,
+        JSON.stringify(this.localAssignments)
+      );
+    } catch (e) {
+      logger.debug('Failed to persist local experiment assignments', e);
+    }
+  }
+
+  /**
+   * Load cached local experiment configs from the experiment storage adapter.
+   */
+  private async loadLocalConfigsCache(): Promise<CachedExperimentConfigs | null> {
+    try {
+      const cached = await this.experimentStorage.getItem(LOCAL_EXPERIMENT_CONFIGS_KEY);
+      if (!cached) {
+        return null;
+      }
+      return JSON.parse(cached) as CachedExperimentConfigs;
+    } catch (e) {
+      logger.debug('Failed to load local experiment configs cache', e);
+      return null;
+    }
+  }
+
+  /**
+   * Save local experiment configs via the experiment storage adapter.
+   */
+  private async saveLocalConfigsCache(experiments: MGMExperimentConfig[]): Promise<void> {
+    try {
+      const cached: CachedExperimentConfigs = {
+        experiments,
+        fetchedAt: Date.now(),
+      };
+      await this.experimentStorage.setItem(LOCAL_EXPERIMENT_CONFIGS_KEY, JSON.stringify(cached));
+    } catch (e) {
+      logger.debug('Failed to save local experiment configs cache', e);
     }
   }
 
