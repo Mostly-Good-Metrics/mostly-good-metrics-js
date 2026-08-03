@@ -16,6 +16,7 @@ A lightweight JavaScript/TypeScript SDK for tracking analytics events with [Most
 - [Properties](#properties)
 - [Manual Flush](#manual-flush)
 - [A/B Testing (Experiments)](#ab-testing-experiments)
+- [Local Experiment Enrollment](#local-experiment-enrollment)
 - [Automatic Behavior](#automatic-behavior)
 - [Debug Logging](#debug-logging)
 - [Framework Integration](#framework-integration)
@@ -157,6 +158,8 @@ MostlyGoodMetrics.configure({
 | `storage` | auto-detected | Custom storage adapter (see [Custom Storage](#custom-storage)) |
 | `networkClient` | fetch-based | Custom network client |
 | `experimentStorage` | auto-detected | Custom key-value storage for the experiments cache (see [A/B Testing](#ab-testing-experiments)) |
+| `experimentMode` | `'server'` | `'server'` (server-assigned variants) or `'local'` (on-device bucketing, see [Local Experiment Enrollment](#local-experiment-enrollment)) |
+| `localExperiments` | - | Inline experiment configs for local mode (zero network) |
 
 ## Automatic Events
 
@@ -340,6 +343,65 @@ MostlyGoodMetrics.configure({
 ```
 
 Async adapters are fully supported - cache hydration completes before `ready()` resolves.
+
+## Local Experiment Enrollment
+
+By default, experiment variants are assigned by the server (`experimentMode: 'server'`), which sends the user ID with the experiments request. If you prefer that **no user identifier ever leaves the device** for experiment enrollment, switch to local mode:
+
+```typescript
+MostlyGoodMetrics.configure({
+  apiKey: 'mgm_proj_your_api_key',
+  experimentMode: 'local',
+});
+
+await MostlyGoodMetrics.ready();
+const variant = MostlyGoodMetrics.getVariant('button-color', 'control');
+```
+
+In local mode the SDK fetches only the experiment *configurations* (`GET /v1/experiments/configs` - a list of `{ id, name, variants }` with no user-specific data; the request carries no `user_id` or `anonymous_id`), and assigns the variant on-device.
+
+### Inline mode (zero network)
+
+Provide the configurations inline and the SDK makes no experiments network request at all:
+
+```typescript
+MostlyGoodMetrics.configure({
+  apiKey: 'mgm_proj_your_api_key',
+  experimentMode: 'local',
+  localExperiments: [
+    {
+      id: '7b1e8a90-4c2d-4f6a-9e3b-2a1d5c8f0e71', // experiment UUID from the dashboard
+      name: 'button-color',
+      variants: ['control', 'treatment'],
+    },
+  ],
+});
+```
+
+### The bucketing algorithm
+
+Local assignment is deterministic and identical across all MGM SDKs (Swift, Android, Flutter, JavaScript):
+
+```
+bucket  = first 8 bytes of SHA-256(utf8("<experiment_uuid>:<user_id>"))
+          interpreted as an unsigned big-endian 64-bit integer
+variant = variants[bucket % variants.length]
+```
+
+`user_id` is the identified user ID if `identify()` has been called, otherwise the anonymous ID. Because the bucket value exceeds `Number.MAX_SAFE_INTEGER`, the SDK computes it with `BigInt`. SHA-256 is computed by a small vendored synchronous implementation (no dependencies; works in browsers, Node.js, React Native and Capacitor webviews, where WebCrypto's async `crypto.subtle` is not universally available). The implementation is locked down by golden-vector tests shared across all SDKs.
+
+### Stickiness
+
+The first variant resolved for an experiment is persisted (keyed by experiment UUID) and reused on subsequent `getVariant()` calls and across restarts. **`identify()` never re-buckets**: a user who was assigned `control` anonymously keeps `control` after logging in, even though their effective user ID changed. A persisted variant is only discarded if it no longer exists in the experiment's variants list.
+
+### Exposure tracking
+
+Unchanged from server mode: on a `getVariant()` hit the variant is stored as a `$experiment_{name}` super property and a `$experiment_exposure` event is tracked once per (user, experiment, variant), with the raw experiment name.
+
+### Caveats
+
+- **No cross-device consistency for anonymous users**: bucketing keys on the local effective user ID, and there is no server-side alias resolution. A user who is anonymous on one device and identified on another may see different variants until they are identified everywhere (identified users get consistent variants on every device, for experiments first evaluated after login).
+- **Config changes**: reordering or removing variants changes assignments for new users (existing sticky assignments are kept while the variant still exists).
 
 ## Automatic Behavior
 

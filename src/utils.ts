@@ -210,6 +210,8 @@ export function resolveConfiguration(config: MGMConfiguration): ResolvedConfigur
     platform: config.platform ?? detectPlatform(),
     sdk: config.sdk ?? 'javascript',
     sdkVersion: config.sdkVersion ?? '',
+    experimentMode: config.experimentMode ?? DefaultConfiguration.experimentMode,
+    localExperiments: config.localExperiments,
     storage: config.storage,
     networkClient: config.networkClient,
     experimentStorage: config.experimentStorage,
