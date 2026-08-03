@@ -210,6 +210,13 @@ export function resolveConfiguration(config: MGMConfiguration): ResolvedConfigur
     platform: config.platform ?? detectPlatform(),
     sdk: config.sdk ?? 'javascript',
     sdkVersion: config.sdkVersion ?? '',
+    persistence:
+      config.persistence ??
+      (config.disableCookies ? 'localStorage' : DefaultConfiguration.persistence),
+    optedOutByDefault: config.optedOutByDefault ?? DefaultConfiguration.optedOutByDefault,
+    respectDoNotTrack: config.respectDoNotTrack ?? DefaultConfiguration.respectDoNotTrack,
+    collectDeviceProperties:
+      config.collectDeviceProperties ?? DefaultConfiguration.collectDeviceProperties,
     storage: config.storage,
     networkClient: config.networkClient,
     experimentStorage: config.experimentStorage,
@@ -334,6 +341,33 @@ export function getDeviceModel(): string {
   }
 
   return '';
+}
+
+/**
+ * Check whether the browser is signalling a tracking opt-out via
+ * Do Not Track (`navigator.doNotTrack === '1'`) or Global Privacy Control
+ * (`navigator.globalPrivacyControl === true`).
+ * Only honored when the `respectDoNotTrack` configuration option is enabled.
+ */
+export function isDoNotTrackEnabled(): boolean {
+  if (typeof navigator === 'undefined') {
+    return false;
+  }
+
+  const nav = navigator as Navigator & {
+    doNotTrack?: string | null;
+    globalPrivacyControl?: boolean;
+  };
+
+  if (nav.doNotTrack === '1') {
+    return true;
+  }
+
+  if (nav.globalPrivacyControl === true) {
+    return true;
+  }
+
+  return false;
 }
 
 /**

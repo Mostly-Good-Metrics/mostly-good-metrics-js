@@ -40,6 +40,8 @@ export type {
   MGMEventContext,
   MGMEventsPayload,
   Platform,
+  PersistenceMode,
+  ResetIdentityOptions,
   SDK,
   DeviceType,
   MGMErrorType,
@@ -89,6 +91,7 @@ export {
   detectDeviceType,
   getOSVersion,
   getDeviceModel,
+  isDoNotTrackEnabled,
 } from './utils';
 
 // Logger (for debugging)

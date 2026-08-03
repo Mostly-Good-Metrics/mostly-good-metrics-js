@@ -6,6 +6,7 @@ import {
   IExperimentStorage,
   MGMError,
   MGMEvent,
+  PersistenceMode,
 } from './types';
 
 const STORAGE_KEY = 'mostlygoodmetrics_events';
@@ -15,6 +16,7 @@ const APP_VERSION_KEY = 'mostlygoodmetrics_app_version';
 const SUPER_PROPERTIES_KEY = 'mostlygoodmetrics_super_properties';
 const IDENTIFY_HASH_KEY = 'mostlygoodmetrics_identify_hash';
 const IDENTIFY_TIMESTAMP_KEY = 'mostlygoodmetrics_identify_timestamp';
+const OPT_OUT_KEY = 'mostlygoodmetrics_opt_out';
 
 /**
  * Check if we're running in a browser environment with localStorage available.
@@ -224,7 +226,15 @@ export class LocalStorageEventStorage implements IEventStorage {
 /**
  * Create the appropriate storage implementation based on the environment.
  */
-export function createDefaultStorage(maxEvents: number): IEventStorage {
+export function createDefaultStorage(
+  maxEvents: number,
+  mode: PersistenceMode = 'localStorage+cookie'
+): IEventStorage {
+  if (mode === 'memory') {
+    logger.debug('Memory persistence mode, using in-memory event storage');
+    return new InMemoryEventStorage(maxEvents);
+  }
+
   if (isLocalStorageAvailable()) {
     logger.debug('Using LocalStorage for event persistence');
     return new LocalStorageEventStorage(maxEvents);
@@ -277,8 +287,10 @@ export class InMemoryExperimentStorage implements IExperimentStorage {
  * React Native apps should inject an AsyncStorage-backed adapter via the
  * `experimentStorage` configuration option instead.
  */
-export function createDefaultExperimentStorage(): IExperimentStorage {
-  if (isLocalStorageAvailable()) {
+export function createDefaultExperimentStorage(
+  mode: PersistenceMode = 'localStorage+cookie'
+): IExperimentStorage {
+  if (mode !== 'memory' && isLocalStorageAvailable()) {
     return new LocalStorageExperimentStorage();
   }
   return new InMemoryExperimentStorage();
@@ -293,31 +305,53 @@ class PersistenceManager {
   private inMemoryAnonymousId: string | null = null;
   private inMemoryAppVersion: string | null = null;
   private inMemorySuperProperties: EventProperties = {};
+  private inMemoryOptOut: boolean | null = null;
+  private inMemoryIdentifyHash: string | null = null;
+  private inMemoryIdentifyLastSentAt: number | null = null;
   private cookieDomain: string | undefined = undefined;
-  private disableCookies = false;
+  private mode: PersistenceMode = 'localStorage+cookie';
 
   /**
-   * Configure cookie settings.
+   * Configure persistence settings.
+   * @param mode Where to persist state ('localStorage+cookie', 'localStorage', or 'memory')
+   * @param cookieDomain Domain for cross-subdomain cookies (e.g., '.example.com')
+   */
+  configurePersistence(mode: PersistenceMode, cookieDomain?: string): void {
+    this.mode = mode;
+    this.cookieDomain = cookieDomain;
+  }
+
+  /**
+   * Backwards-compatible cookie configuration.
    * @param cookieDomain Domain for cross-subdomain cookies (e.g., '.example.com')
    * @param disableCookies If true, only use localStorage (no cookies)
    */
   configureCookies(cookieDomain?: string, disableCookies?: boolean): void {
-    this.cookieDomain = cookieDomain;
-    this.disableCookies = disableCookies ?? false;
+    this.configurePersistence(
+      disableCookies ? 'localStorage' : 'localStorage+cookie',
+      cookieDomain
+    );
   }
 
   /**
    * Check if cookies should be used.
    */
   private shouldUseCookies(): boolean {
-    return !this.disableCookies && isCookieAvailable();
+    return this.mode === 'localStorage+cookie' && isCookieAvailable();
+  }
+
+  /**
+   * Check if localStorage should be used.
+   */
+  private shouldUseLocalStorage(): boolean {
+    return this.mode !== 'memory' && isLocalStorageAvailable();
   }
 
   /**
    * Get the persisted user ID.
    */
   getUserId(): string | null {
-    if (isLocalStorageAvailable()) {
+    if (this.shouldUseLocalStorage()) {
       return localStorage.getItem(USER_ID_KEY);
     }
     return this.inMemoryUserId;
@@ -327,7 +361,7 @@ class PersistenceManager {
    * Set the user ID (persists across sessions).
    */
   setUserId(userId: string | null): void {
-    if (isLocalStorageAvailable()) {
+    if (this.shouldUseLocalStorage()) {
       if (userId) {
         localStorage.setItem(USER_ID_KEY, userId);
       } else {
@@ -351,7 +385,7 @@ class PersistenceManager {
     }
 
     // Fall back to localStorage
-    if (isLocalStorageAvailable()) {
+    if (this.shouldUseLocalStorage()) {
       return localStorage.getItem(ANONYMOUS_ID_KEY);
     }
 
@@ -369,7 +403,7 @@ class PersistenceManager {
     }
 
     // Also save to localStorage as fallback
-    if (isLocalStorageAvailable()) {
+    if (this.shouldUseLocalStorage()) {
       localStorage.setItem(ANONYMOUS_ID_KEY, anonymousId);
     }
 
@@ -419,7 +453,7 @@ class PersistenceManager {
    * Get the persisted app version (for detecting updates).
    */
   getAppVersion(): string | null {
-    if (isLocalStorageAvailable()) {
+    if (this.shouldUseLocalStorage()) {
       return localStorage.getItem(APP_VERSION_KEY);
     }
     return this.inMemoryAppVersion;
@@ -429,7 +463,7 @@ class PersistenceManager {
    * Set the app version.
    */
   setAppVersion(version: string | null): void {
-    if (isLocalStorageAvailable()) {
+    if (this.shouldUseLocalStorage()) {
       if (version) {
         localStorage.setItem(APP_VERSION_KEY, version);
       } else {
@@ -446,7 +480,7 @@ class PersistenceManager {
   isFirstLaunch(): boolean {
     const FIRST_LAUNCH_KEY = 'mostlygoodmetrics_installed';
 
-    if (!isLocalStorageAvailable()) {
+    if (!this.shouldUseLocalStorage()) {
       return false; // Can't reliably detect without persistence
     }
 
@@ -462,7 +496,7 @@ class PersistenceManager {
    * Get all super properties.
    */
   getSuperProperties(): EventProperties {
-    if (isLocalStorageAvailable()) {
+    if (this.shouldUseLocalStorage()) {
       try {
         const stored = localStorage.getItem(SUPER_PROPERTIES_KEY);
         if (stored) {
@@ -512,7 +546,7 @@ class PersistenceManager {
 
   private saveSuperProperties(properties: EventProperties): void {
     this.inMemorySuperProperties = properties;
-    if (isLocalStorageAvailable()) {
+    if (this.shouldUseLocalStorage()) {
       try {
         localStorage.setItem(SUPER_PROPERTIES_KEY, JSON.stringify(properties));
       } catch (e) {
@@ -525,49 +559,117 @@ class PersistenceManager {
    * Get the stored identify hash (for debouncing).
    */
   getIdentifyHash(): string | null {
-    if (isLocalStorageAvailable()) {
+    if (this.shouldUseLocalStorage()) {
       return localStorage.getItem(IDENTIFY_HASH_KEY);
     }
-    return null;
+    return this.inMemoryIdentifyHash;
   }
 
   /**
    * Set the identify hash.
    */
   setIdentifyHash(hash: string): void {
-    if (isLocalStorageAvailable()) {
+    if (this.shouldUseLocalStorage()) {
       localStorage.setItem(IDENTIFY_HASH_KEY, hash);
     }
+    this.inMemoryIdentifyHash = hash;
   }
 
   /**
    * Get the timestamp of the last identify event sent.
    */
   getIdentifyLastSentAt(): number | null {
-    if (isLocalStorageAvailable()) {
+    if (this.shouldUseLocalStorage()) {
       const timestamp = localStorage.getItem(IDENTIFY_TIMESTAMP_KEY);
       return timestamp ? parseInt(timestamp, 10) : null;
     }
-    return null;
+    return this.inMemoryIdentifyLastSentAt;
   }
 
   /**
    * Set the timestamp of the last identify event sent.
    */
   setIdentifyLastSentAt(timestamp: number): void {
-    if (isLocalStorageAvailable()) {
+    if (this.shouldUseLocalStorage()) {
       localStorage.setItem(IDENTIFY_TIMESTAMP_KEY, timestamp.toString());
     }
+    this.inMemoryIdentifyLastSentAt = timestamp;
   }
 
   /**
    * Clear identify debounce state (used when resetting identity).
    */
   clearIdentifyState(): void {
-    if (isLocalStorageAvailable()) {
+    if (this.shouldUseLocalStorage()) {
       localStorage.removeItem(IDENTIFY_HASH_KEY);
       localStorage.removeItem(IDENTIFY_TIMESTAMP_KEY);
     }
+    this.inMemoryIdentifyHash = null;
+    this.inMemoryIdentifyLastSentAt = null;
+  }
+
+  /**
+   * Get the persisted opt-out choice.
+   * Returns true (opted out), false (explicitly opted in), or null when the
+   * user has never made an explicit choice.
+   */
+  getOptOutStatus(): boolean | null {
+    // Check cookies first (consistent with anonymous ID persistence)
+    if (this.shouldUseCookies()) {
+      const cookieValue = getCookie(OPT_OUT_KEY);
+      if (cookieValue === 'true') {
+        return true;
+      }
+      if (cookieValue === 'false') {
+        return false;
+      }
+    }
+
+    if (this.shouldUseLocalStorage()) {
+      try {
+        const stored = localStorage.getItem(OPT_OUT_KEY);
+        if (stored === 'true') {
+          return true;
+        }
+        if (stored === 'false') {
+          return false;
+        }
+      } catch (e) {
+        logger.warn('Failed to read opt-out status from localStorage', e);
+      }
+    }
+
+    // Only consult the in-memory value when no durable storage is usable
+    // (memory mode or non-browser environments). When durable storage is
+    // available but empty, the user has made no persisted choice.
+    if (!this.shouldUseCookies() && !this.shouldUseLocalStorage()) {
+      return this.inMemoryOptOut;
+    }
+
+    return null;
+  }
+
+  /**
+   * Persist the user's explicit opt-out choice.
+   * Both states are stored so an explicit optIn() overrides
+   * `optedOutByDefault` and Do Not Track defaults on later visits.
+   */
+  setOptOutStatus(optedOut: boolean): void {
+    const value = optedOut ? 'true' : 'false';
+
+    if (this.shouldUseCookies()) {
+      setCookie(OPT_OUT_KEY, value, this.cookieDomain);
+    }
+
+    if (this.shouldUseLocalStorage()) {
+      try {
+        localStorage.setItem(OPT_OUT_KEY, value);
+      } catch (e) {
+        logger.warn('Failed to persist opt-out status to localStorage', e);
+      }
+    }
+
+    this.inMemoryOptOut = optedOut;
   }
 }
 

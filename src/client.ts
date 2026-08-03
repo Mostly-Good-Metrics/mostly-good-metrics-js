@@ -12,6 +12,7 @@ import {
   MGMEvent,
   MGMEventContext,
   MGMEventsPayload,
+  ResetIdentityOptions,
   ResolvedConfiguration,
   SystemEvents,
   SystemProperties,
@@ -27,6 +28,7 @@ import {
   getLocale,
   getOSVersion,
   getTimezone,
+  isDoNotTrackEnabled,
   resolveConfiguration,
   sanitizeProperties,
   validateEventName,
@@ -54,6 +56,7 @@ export class MostlyGoodMetrics {
   private sessionIdValue: string;
   private anonymousIdValue: string;
   private lifecycleSetup = false;
+  private optedOut: boolean;
 
   // A/B testing state
   private assignedVariants: Record<string, string> = {}; // Server-assigned variants
@@ -70,24 +73,48 @@ export class MostlyGoodMetrics {
     this.config = resolveConfiguration(config);
     this.sessionIdValue = generateUUID();
 
-    // Configure cookie settings before initializing anonymous ID
-    persistence.configureCookies(config.cookieDomain, config.disableCookies);
+    // Configure persistence settings before initializing anonymous ID.
+    // `disableCookies` is honored as an alias for persistence: 'localStorage'
+    // during configuration resolution.
+    persistence.configurePersistence(this.config.persistence, config.cookieDomain);
     this.anonymousIdValue = persistence.initializeAnonymousId(
       config.anonymousId,
       generateAnonymousId
     );
 
+    // Resolve the opt-out state:
+    // 1. An explicit persisted optOut()/optIn() choice always wins.
+    // 2. Otherwise `optedOutByDefault` (consent-first sites).
+    // 3. Otherwise browser privacy signals, when `respectDoNotTrack` is on.
+    const storedOptOut = persistence.getOptOutStatus();
+    if (storedOptOut !== null) {
+      this.optedOut = storedOptOut;
+    } else if (this.config.optedOutByDefault) {
+      this.optedOut = true;
+    } else if (this.config.respectDoNotTrack && isDoNotTrackEnabled()) {
+      this.optedOut = true;
+    } else {
+      this.optedOut = false;
+    }
+
     // Set up logging
     setDebugLogging(this.config.enableDebugLogging);
 
+    if (this.optedOut) {
+      logger.info('Tracking is disabled (opted out)');
+    }
+
     // Initialize storage
-    this.storage = this.config.storage ?? createDefaultStorage(this.config.maxStoredEvents);
+    this.storage =
+      this.config.storage ??
+      createDefaultStorage(this.config.maxStoredEvents, this.config.persistence);
 
     // Initialize network client
     this.networkClient = this.config.networkClient ?? createDefaultNetworkClient();
 
     // Initialize experiment storage (pluggable for React Native AsyncStorage etc.)
-    this.experimentStorage = this.config.experimentStorage ?? createDefaultExperimentStorage();
+    this.experimentStorage =
+      this.config.experimentStorage ?? createDefaultExperimentStorage(this.config.persistence);
 
     // Initialize experiments ready promise
     this.experimentsReadyPromise = new Promise((resolve) => {
@@ -175,9 +202,44 @@ export class MostlyGoodMetrics {
 
   /**
    * Reset user identity.
+   * Pass `{ clearAnonymousId: true }` for a full "forget me" that also
+   * rotates the anonymous ID, purges queued events, super properties,
+   * identify debounce state and the cached experiment variants.
    */
-  static resetIdentity(): void {
-    MostlyGoodMetrics.instance?.resetIdentity();
+  static resetIdentity(options?: ResetIdentityOptions): void {
+    MostlyGoodMetrics.instance?.resetIdentity(options);
+  }
+
+  /**
+   * Reset the anonymous ID to a newly generated one.
+   * Returns the new anonymous ID, or null if the SDK is not configured.
+   */
+  static resetAnonymousId(): string | null {
+    return MostlyGoodMetrics.instance?.resetAnonymousId() ?? null;
+  }
+
+  /**
+   * Opt the current user out of all tracking.
+   * Persisted across reloads; also purges any queued (unsent) events.
+   */
+  static optOut(): void {
+    MostlyGoodMetrics.instance?.optOut();
+  }
+
+  /**
+   * Opt the current user back in to tracking.
+   * Persisted across reloads.
+   */
+  static optIn(): void {
+    MostlyGoodMetrics.instance?.optIn();
+  }
+
+  /**
+   * Check whether tracking is currently opted out.
+   * Returns false if the SDK is not configured.
+   */
+  static isOptedOut(): boolean {
+    return MostlyGoodMetrics.instance?.isOptedOut() ?? false;
   }
 
   /**
@@ -311,6 +373,11 @@ export class MostlyGoodMetrics {
    * Track an event with the given name and optional properties.
    */
   track(name: string, properties?: EventProperties): void {
+    if (this.optedOut) {
+      logger.debug(`Tracking is opted out, ignoring event: ${name}`);
+      return;
+    }
+
     try {
       validateEventName(name);
     } catch (e) {
@@ -326,8 +393,12 @@ export class MostlyGoodMetrics {
     const mergedProperties: EventProperties = {
       ...superProperties,
       ...sanitizedProperties,
-      [SystemProperties.DEVICE_TYPE]: detectDeviceType(),
-      [SystemProperties.DEVICE_MODEL]: getDeviceModel(),
+      ...(this.config.collectDeviceProperties
+        ? {
+            [SystemProperties.DEVICE_TYPE]: detectDeviceType(),
+            [SystemProperties.DEVICE_MODEL]: getDeviceModel(),
+          }
+        : {}),
       [SystemProperties.SDK]: this.config.sdk,
     };
 
@@ -343,8 +414,8 @@ export class MostlyGoodMetrics {
       app_version: this.config.appVersion || undefined,
       os_version: this.config.osVersion || getOSVersion() || undefined,
       environment: this.config.environment,
-      locale: getLocale(),
-      timezone: getTimezone(),
+      locale: this.config.collectDeviceProperties ? getLocale() : undefined,
+      timezone: this.config.collectDeviceProperties ? getTimezone() : undefined,
       properties: Object.keys(mergedProperties).length > 0 ? mergedProperties : undefined,
     };
 
@@ -371,6 +442,11 @@ export class MostlyGoodMetrics {
    * @param profile Optional profile data (email, name)
    */
   identify(userId: string, profile?: UserProfile): void {
+    if (this.optedOut) {
+      logger.debug('Tracking is opted out, ignoring identify');
+      return;
+    }
+
     if (!userId) {
       logger.warn('identify called with empty userId');
       return;
@@ -457,11 +533,99 @@ export class MostlyGoodMetrics {
   /**
    * Reset user identity.
    * Clears the user ID and identify debounce state.
+   *
+   * Pass `{ clearAnonymousId: true }` for a full "forget me": additionally
+   * rotates the anonymous ID, purges queued (unsent) events, clears super
+   * properties and clears the cached experiment variants and exposure
+   * dedup flags, then refetches experiments for the fresh identity.
    */
-  resetIdentity(): void {
+  resetIdentity(options?: ResetIdentityOptions): void {
     logger.debug('Resetting user identity');
     persistence.setUserId(null);
     persistence.clearIdentifyState();
+
+    if (options?.clearAnonymousId) {
+      logger.debug('Performing full identity reset (forget me)');
+
+      // Rotate the anonymous ID
+      this.resetAnonymousId();
+
+      // Purge queued (unsent) events
+      this.storage.clear().catch((e) => {
+        logger.warn('Failed to clear queued events during identity reset', e);
+      });
+
+      // Clear super properties (including $experiment_* assignments)
+      persistence.clearSuperProperties();
+
+      // Clear in-memory and persisted experiment state
+      this.assignedVariants = {};
+      this.trackedExposures = new Set();
+      void this.clearExperimentsCache();
+
+      // Refetch experiments for the fresh identity (no-op while opted out)
+      this.resetExperimentsReadyPromise();
+      void this.fetchExperiments();
+    }
+  }
+
+  /**
+   * Reset the anonymous ID to a newly generated one and persist it.
+   * Returns the new anonymous ID.
+   *
+   * For a complete "forget me" (which also purges queued events, super
+   * properties and cached experiments), use
+   * `resetIdentity({ clearAnonymousId: true })`.
+   */
+  resetAnonymousId(): string {
+    const newId = persistence.resetAnonymousId(generateAnonymousId);
+    this.anonymousIdValue = newId;
+    logger.debug('Anonymous ID reset');
+    return newId;
+  }
+
+  /**
+   * Opt the current user out of all tracking.
+   *
+   * Immediately stops tracking (track/identify/flush become no-ops), purges
+   * any queued (unsent) events, and persists the choice so it survives
+   * reloads (except in `persistence: 'memory'` mode, where nothing is
+   * persisted).
+   */
+  optOut(): void {
+    logger.info('Opting out of tracking');
+    this.optedOut = true;
+    persistence.setOptOutStatus(true);
+
+    // Purge queued events so nothing tracked pre-opt-out is ever sent
+    this.storage.clear().catch((e) => {
+      logger.warn('Failed to clear queued events during opt-out', e);
+    });
+  }
+
+  /**
+   * Opt the current user back in to tracking.
+   * Persists the choice, overriding `optedOutByDefault` and Do Not Track
+   * defaults on later visits.
+   */
+  optIn(): void {
+    logger.info('Opting in to tracking');
+    const wasOptedOut = this.optedOut;
+    this.optedOut = false;
+    persistence.setOptOutStatus(false);
+
+    // Experiments are not fetched while opted out - fetch them now
+    if (wasOptedOut) {
+      this.resetExperimentsReadyPromise();
+      void this.fetchExperiments();
+    }
+  }
+
+  /**
+   * Check whether tracking is currently opted out.
+   */
+  isOptedOut(): boolean {
+    return this.optedOut;
   }
 
   /**
@@ -476,6 +640,11 @@ export class MostlyGoodMetrics {
    * Flush pending events to the server.
    */
   async flush(): Promise<void> {
+    if (this.optedOut) {
+      logger.debug('Tracking is opted out, skipping flush');
+      return;
+    }
+
     if (this.isFlushingInternal) {
       logger.debug('Flush already in progress');
       return;
@@ -694,8 +863,8 @@ export class MostlyGoodMetrics {
 
       session_id: this.sessionIdValue,
       environment: this.config.environment,
-      locale: getLocale(),
-      timezone: getTimezone(),
+      locale: this.config.collectDeviceProperties ? getLocale() : undefined,
+      timezone: this.config.collectDeviceProperties ? getTimezone() : undefined,
     };
 
     return { events, context };
@@ -879,6 +1048,13 @@ export class MostlyGoodMetrics {
    * still applied atomically - late variants are better than none.
    */
   private async fetchExperiments(): Promise<void> {
+    // No network requests while opted out. optIn() triggers a fetch.
+    if (this.optedOut) {
+      logger.debug('Tracking is opted out, skipping experiments fetch');
+      this.markExperimentsReady();
+      return;
+    }
+
     const currentUserId = this.userId ?? this.anonymousIdValue;
 
     // Build URL with user_id for server-side variant assignment.
@@ -1004,6 +1180,19 @@ export class MostlyGoodMetrics {
       );
     } catch (e) {
       logger.debug('Failed to persist experiment exposures', e);
+    }
+  }
+
+  /**
+   * Clear the persisted experiment variants cache and exposure dedup flags.
+   * Used by the full identity reset (forget me).
+   */
+  private async clearExperimentsCache(): Promise<void> {
+    try {
+      await this.experimentStorage.setItem(EXPERIMENTS_CACHE_KEY, '');
+      await this.experimentStorage.setItem(EXPERIMENT_EXPOSURES_KEY, '[]');
+    } catch (e) {
+      logger.debug('Failed to clear experiments cache', e);
     }
   }
 

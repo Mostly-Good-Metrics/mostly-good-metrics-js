@@ -8,6 +8,7 @@ A lightweight JavaScript/TypeScript SDK for tracking analytics events with [Most
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [User Identification](#user-identification)
+- [Privacy](#privacy)
 - [Configuration Options](#configuration-options)
 - [Automatic Events](#automatic-events)
 - [Automatic Properties](#automatic-properties)
@@ -119,6 +120,115 @@ When `disableCookies: true`:
 - No cookies are set
 - Cross-subdomain tracking is disabled
 
+See the [Privacy](#privacy) section for the full set of privacy controls (opt-out, Do Not Track, memory-only persistence, forget-me, and more).
+
+## Privacy
+
+The SDK ships with a full set of privacy controls: user-level opt-out, browser privacy signals (Do Not Track / Global Privacy Control), anonymous ID rotation and a full "forget me", reduced data collection, and configurable persistence including a memory-only mode.
+
+### Opt-out / opt-in
+
+```typescript
+MostlyGoodMetrics.optOut();      // Stop all tracking immediately
+MostlyGoodMetrics.isOptedOut();  // => true
+MostlyGoodMetrics.optIn();       // Resume tracking
+```
+
+- `optOut()` immediately stops tracking: `track()`, `identify()` and `flush()` become no-ops, and no network requests (including experiment fetches) are made.
+- Any queued (unsent) events are purged on opt-out, so nothing tracked before the call is ever sent.
+- The choice is persisted (localStorage + cookie, consistent with the anonymous ID) and survives page reloads. In `persistence: 'memory'` mode nothing is written, so the choice only lasts for the page session.
+- An explicit `optIn()` is also persisted and overrides `optedOutByDefault` and Do Not Track defaults on later visits.
+
+### Consent-first sites (`optedOutByDefault`)
+
+For sites that must not track before consent, start opted out and opt the user in once they consent:
+
+```typescript
+MostlyGoodMetrics.configure({
+  apiKey: 'mgm_proj_your_api_key',
+  optedOutByDefault: true,
+  persistence: 'memory', // optional: also avoid writing any IDs before consent
+});
+
+// Later, when the user consents:
+MostlyGoodMetrics.optIn();
+```
+
+A previously persisted `optIn()`/`optOut()` choice takes precedence over `optedOutByDefault`.
+
+> **Tip:** `optedOutByDefault` alone still persists an anonymous ID to localStorage/cookies. Combine it with `persistence: 'memory'` if nothing may be written before consent, then call `optIn()` after consent (note: with memory persistence the anonymous ID resets on every page load).
+
+### Do Not Track / Global Privacy Control (`respectDoNotTrack`)
+
+```typescript
+MostlyGoodMetrics.configure({
+  apiKey: 'mgm_proj_your_api_key',
+  respectDoNotTrack: true,
+});
+```
+
+When enabled, the SDK treats `navigator.doNotTrack === '1'` or `navigator.globalPrivacyControl === true` as opted out from initialization. Off by default. An explicit persisted `optIn()` takes precedence over the browser signal.
+
+### Resetting the anonymous ID / forget me
+
+```typescript
+// Rotate just the anonymous ID (returns the new ID)
+MostlyGoodMetrics.resetAnonymousId();
+
+// Standard logout: clear the user ID, keep the anonymous ID
+MostlyGoodMetrics.resetIdentity();
+
+// Full "forget me": also rotates the anonymous ID and purges local state
+MostlyGoodMetrics.resetIdentity({ clearAnonymousId: true });
+```
+
+`resetIdentity({ clearAnonymousId: true })` clears everything tied to the previous identity:
+
+- User ID and identify debounce state
+- Anonymous ID (rotated to a fresh one)
+- Queued (unsent) events
+- Super properties (including `$experiment_*` assignments)
+- Cached experiment variants and exposure dedup flags
+
+### Reduced data collection (`collectDeviceProperties`)
+
+```typescript
+MostlyGoodMetrics.configure({
+  apiKey: 'mgm_proj_your_api_key',
+  collectDeviceProperties: false,
+});
+```
+
+When `false`, the SDK omits `$device_type` and `$device_model` from event properties and `locale`/`timezone` from events and batch context. `platform`, `os_version` and `app_version` are still sent. Default: `true`.
+
+### Persistence modes (`persistence`)
+
+```typescript
+MostlyGoodMetrics.configure({
+  apiKey: 'mgm_proj_your_api_key',
+  persistence: 'memory', // 'localStorage+cookie' (default) | 'localStorage' | 'memory'
+});
+```
+
+| Mode | Anonymous ID | Event queue | Cookies | Survives reload |
+|------|--------------|-------------|---------|-----------------|
+| `'localStorage+cookie'` (default) | localStorage + cookie | localStorage | Yes (enables cross-subdomain tracking) | Yes |
+| `'localStorage'` | localStorage only | localStorage | No | Yes |
+| `'memory'` | In-memory only | In-memory only | No | No |
+
+In `'memory'` mode nothing is written to localStorage or cookies: the anonymous ID, event queue, super properties, opt-out flag and experiment cache all live in memory and are lost on reload. `disableCookies: true` keeps working as an alias for `persistence: 'localStorage'`; an explicit `persistence` option wins over `disableCookies`.
+
+### What the SDK collects automatically
+
+With default settings, every event includes:
+
+- **Identity**: `user_id` (identified ID or generated anonymous ID), `session_id` (per page load)
+- **Device** (disable with `collectDeviceProperties: false`): `$device_type`, `$device_model`, `locale`, `timezone`
+- **App/environment**: `platform`, `os_version`, `app_version` (if configured), `environment`, `$sdk`
+- **Metadata**: `client_event_id`, `timestamp`
+
+See [Automatic Properties](#automatic-properties) and [Automatic Context](#automatic-context) for the full reference. The SDK never reads or transmits anything beyond what is listed there plus the properties you pass explicitly.
+
 ## Configuration Options
 
 For more control, pass additional configuration:
@@ -152,7 +262,11 @@ MostlyGoodMetrics.configure({
 | `trackAppLifecycleEvents` | `false` | Auto-track lifecycle events ($app_opened, etc.) |
 | `bundleId` | auto-detected | Custom bundle identifier |
 | `cookieDomain` | - | Cookie domain for cross-subdomain tracking (e.g., `.example.com`) |
-| `disableCookies` | `false` | Disable cookies entirely (uses localStorage only) |
+| `disableCookies` | `false` | Disable cookies entirely (alias for `persistence: 'localStorage'`) |
+| `persistence` | `'localStorage+cookie'` | Where SDK state lives: `'localStorage+cookie'`, `'localStorage'`, or `'memory'` (see [Privacy](#privacy)) |
+| `optedOutByDefault` | `false` | Start opted out until `optIn()` is called (consent-first sites) |
+| `respectDoNotTrack` | `false` | Honor `navigator.doNotTrack` / Global Privacy Control as opt-out |
+| `collectDeviceProperties` | `true` | Collect `$device_type`, `$device_model`, `locale`, `timezone` |
 | `anonymousId` | auto-generated | Override anonymous ID (for wrapper SDKs) |
 | `storage` | auto-detected | Custom storage adapter (see [Custom Storage](#custom-storage)) |
 | `networkClient` | fetch-based | Custom network client |
