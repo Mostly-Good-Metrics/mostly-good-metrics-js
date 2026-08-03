@@ -1,9 +1,10 @@
 import { MostlyGoodMetrics } from './client';
-import { InMemoryEventStorage } from './storage';
+import { InMemoryEventStorage, InMemoryExperimentStorage } from './storage';
 import {
   IExperimentStorage,
   INetworkClient,
   MGMEventsPayload,
+  MGMExperimentConfig,
   ResolvedConfiguration,
   SendResult,
 } from './types';
@@ -2276,6 +2277,405 @@ describe('MostlyGoodMetrics', () => {
         expect(networkClient.sentPayloads[0].context.locale).toBeUndefined();
         expect(networkClient.sentPayloads[0].context.timezone).toBeUndefined();
         expect(networkClient.sentPayloads[0].context.platform).toBeDefined();
+      });
+    });
+  });
+
+  describe('local experiment enrollment', () => {
+    const EXPERIMENT_UUID = '7b1e8a90-4c2d-4f6a-9e3b-2a1d5c8f0e71';
+    const MULTI_VARIANT_UUID = '3f9c2d11-8b7a-4e5f-a0c6-91d2e3f4a5b6';
+    const ASSIGNMENTS_KEY = 'mgm_local_experiment_assignments';
+
+    const localExperiments: MGMExperimentConfig[] = [
+      { id: EXPERIMENT_UUID, name: 'button-color', variants: ['control', 'treatment'] },
+      { id: MULTI_VARIANT_UUID, name: 'onboarding-flow', variants: ['a', 'b', 'c'] },
+    ];
+
+    let experimentStorage: InMemoryExperimentStorage;
+    let originalFetch: typeof global.fetch;
+
+    const waitForAsync = () => new Promise((resolve) => setTimeout(resolve, 10));
+
+    beforeEach(() => {
+      experimentStorage = new InMemoryExperimentStorage();
+      originalFetch = global.fetch;
+      localStorage.clear();
+    });
+
+    afterEach(() => {
+      global.fetch = originalFetch;
+      localStorage.clear();
+    });
+
+    const configureLocal = (overrides: Record<string, unknown> = {}) =>
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        experimentStorage,
+        trackAppLifecycleEvents: false,
+        experimentMode: 'local',
+        anonymousId: 'user_123',
+        localExperiments,
+        ...overrides,
+      });
+
+    it('should default to server experiment mode', () => {
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+      });
+
+      expect(MostlyGoodMetrics.shared?.configuration.experimentMode).toBe('server');
+    });
+
+    it('should make no network requests with inline localExperiments', async () => {
+      const fetchMock = jest.fn();
+      global.fetch = fetchMock as unknown as typeof global.fetch;
+
+      configureLocal();
+      await MostlyGoodMetrics.ready();
+
+      expect(MostlyGoodMetrics.getVariant('button-color')).toBe('control');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('should assign variants matching the shared golden vectors', async () => {
+      // Vector: 7b1e8a90-... + "user_123" -> bucket 11452140836674321702 -> 'control'
+      configureLocal({ anonymousId: 'user_123' });
+      await MostlyGoodMetrics.ready();
+      expect(MostlyGoodMetrics.getVariant('button-color')).toBe('control');
+      // Vector: 3f9c2d11-... + "user_123" -> bucket 3772238658190659659 -> 'c'
+      expect(MostlyGoodMetrics.getVariant('onboarding-flow')).toBe('c');
+
+      // Vector: 7b1e8a90-... + "$anon_abc123def456" -> 'treatment'
+      MostlyGoodMetrics.reset();
+      configureLocal({
+        anonymousId: '$anon_abc123def456',
+        experimentStorage: new InMemoryExperimentStorage(),
+      });
+      await MostlyGoodMetrics.ready();
+      expect(MostlyGoodMetrics.getVariant('button-color')).toBe('treatment');
+    });
+
+    it('should keep assignments sticky across identify (never re-buckets)', async () => {
+      const fetchMock = jest.fn();
+      global.fetch = fetchMock as unknown as typeof global.fetch;
+
+      configureLocal();
+      await MostlyGoodMetrics.ready();
+
+      expect(MostlyGoodMetrics.getVariant('button-color')).toBe('control');
+
+      // '$anon_abc123def456' would bucket to 'treatment' - but the persisted
+      // assignment must win
+      MostlyGoodMetrics.identify('$anon_abc123def456');
+      await waitForAsync();
+
+      expect(MostlyGoodMetrics.getVariant('button-color')).toBe('control');
+      // Local mode never refetches on identity change either
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('should persist assignments per experiment UUID', async () => {
+      configureLocal();
+      await MostlyGoodMetrics.ready();
+
+      MostlyGoodMetrics.getVariant('button-color');
+      await waitForAsync();
+
+      const raw = experimentStorage.getItem(ASSIGNMENTS_KEY);
+      expect(raw).not.toBeNull();
+      expect(JSON.parse(raw as string)).toEqual({ [EXPERIMENT_UUID]: 'control' });
+    });
+
+    it('should reuse a persisted assignment across restarts', async () => {
+      // Seed the opposite of what bucketing would compute for user_123
+      experimentStorage.setItem(
+        ASSIGNMENTS_KEY,
+        JSON.stringify({ [EXPERIMENT_UUID]: 'treatment' })
+      );
+
+      configureLocal();
+      await MostlyGoodMetrics.ready();
+
+      expect(MostlyGoodMetrics.getVariant('button-color')).toBe('treatment');
+    });
+
+    it('should re-bucket when a persisted variant no longer exists', async () => {
+      experimentStorage.setItem(
+        ASSIGNMENTS_KEY,
+        JSON.stringify({ [EXPERIMENT_UUID]: 'removed-variant' })
+      );
+
+      configureLocal();
+      await MostlyGoodMetrics.ready();
+
+      expect(MostlyGoodMetrics.getVariant('button-color')).toBe('control');
+    });
+
+    it('should fetch identity-free configs when no inline experiments are given', async () => {
+      const fetchMock = jest.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ experiments: localExperiments }),
+      });
+      global.fetch = fetchMock as unknown as typeof global.fetch;
+
+      configureLocal({ localExperiments: undefined });
+      await MostlyGoodMetrics.ready();
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [url, options] = fetchMock.mock.calls[0] as [
+        string,
+        { headers: Record<string, string> },
+      ];
+      // The privacy point of local mode: no user identifiers on the wire
+      expect(url).toBe('https://ingest.mostlygoodmetrics.com/v1/experiments/configs');
+      expect(url).not.toContain('user_id');
+      expect(url).not.toContain('anonymous_id');
+      expect(options.headers.Authorization).toBe('Bearer test-key');
+
+      expect(MostlyGoodMetrics.getVariant('button-color')).toBe('control');
+    });
+
+    it('should serve cached configs without refetching on restart', async () => {
+      const fetchMock = jest.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ experiments: localExperiments }),
+      });
+      global.fetch = fetchMock as unknown as typeof global.fetch;
+
+      configureLocal({ localExperiments: undefined });
+      await MostlyGoodMetrics.ready();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      // Restart with the same experiment storage: fresh cache, no refetch
+      MostlyGoodMetrics.reset();
+      configureLocal({ localExperiments: undefined });
+      await MostlyGoodMetrics.ready();
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(MostlyGoodMetrics.getVariant('button-color')).toBe('control');
+    });
+
+    it('should track a $experiment_exposure event with the raw experiment name, once', async () => {
+      configureLocal();
+      await MostlyGoodMetrics.ready();
+
+      MostlyGoodMetrics.getVariant('button-color');
+      MostlyGoodMetrics.getVariant('button-color');
+      await waitForAsync();
+
+      const events = await storage.fetchEvents(100);
+      const exposures = events.filter((e) => e.name === '$experiment_exposure');
+      expect(exposures).toHaveLength(1);
+      expect(exposures[0].properties?.['$experiment_name']).toBe('button-color');
+      expect(exposures[0].properties?.['$variant']).toBe('control');
+    });
+
+    it('should set the experiment super property on assignment', async () => {
+      configureLocal();
+      await MostlyGoodMetrics.ready();
+
+      MostlyGoodMetrics.getVariant('button-color');
+
+      expect(MostlyGoodMetrics.getSuperProperties()['$experiment_button_color']).toBe('control');
+    });
+
+    it('should return the fallback for unknown experiments once loaded', async () => {
+      configureLocal();
+      await MostlyGoodMetrics.ready();
+
+      expect(MostlyGoodMetrics.getVariant('nonexistent')).toBeNull();
+      expect(MostlyGoodMetrics.getVariant('nonexistent', 'fallback')).toBe('fallback');
+    });
+  });
+
+  describe('privacy controls x local experiments', () => {
+    // Golden vectors: experiment 7b1e8a90-... buckets 'user_123' -> 'control'
+    // and '$anon_abc123def456' -> 'treatment'
+    const EXPERIMENT_UUID = '7b1e8a90-4c2d-4f6a-9e3b-2a1d5c8f0e71';
+    const ASSIGNMENTS_KEY = 'mgm_local_experiment_assignments';
+    const OPT_OUT_KEY = 'mostlygoodmetrics_opt_out';
+
+    const localExperiments: MGMExperimentConfig[] = [
+      { id: EXPERIMENT_UUID, name: 'button-color', variants: ['control', 'treatment'] },
+    ];
+
+    let experimentStorage: InMemoryExperimentStorage;
+    let originalFetch: typeof global.fetch;
+
+    const waitForAsync = () => new Promise((resolve) => setTimeout(resolve, 10));
+
+    const clearPersistedState = () => {
+      localStorage.clear();
+      document.cookie = `${OPT_OUT_KEY}=; path=/; max-age=0`;
+      document.cookie = 'mostlygoodmetrics_anonymous_id=; path=/; max-age=0';
+    };
+
+    beforeEach(() => {
+      experimentStorage = new InMemoryExperimentStorage();
+      originalFetch = global.fetch;
+      clearPersistedState();
+    });
+
+    afterEach(() => {
+      global.fetch = originalFetch;
+      clearPersistedState();
+    });
+
+    const configureLocal = (overrides: Record<string, unknown> = {}) =>
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        experimentStorage,
+        trackAppLifecycleEvents: false,
+        experimentMode: 'local',
+        anonymousId: 'user_123',
+        localExperiments,
+        ...overrides,
+      });
+
+    describe('forget-me and anonymous ID rotation', () => {
+      it('should clear sticky assignments on forget-me and re-bucket the new identity', async () => {
+        const instance = configureLocal();
+        await MostlyGoodMetrics.ready();
+
+        // Golden vector: user_123 -> 'control'
+        expect(MostlyGoodMetrics.getVariant('button-color')).toBe('control');
+        await waitForAsync();
+        expect(JSON.parse(experimentStorage.getItem(ASSIGNMENTS_KEY) as string)).toEqual({
+          [EXPERIMENT_UUID]: 'control',
+        });
+
+        instance.resetIdentity({ clearAnonymousId: true });
+        await waitForAsync();
+
+        // Persisted assignments cleared
+        expect(['{}', null]).toContain(experimentStorage.getItem(ASSIGNMENTS_KEY));
+
+        // Re-bucketed under the new identity - golden vector:
+        // '$anon_abc123def456' -> 'treatment'
+        instance.identify('$anon_abc123def456');
+        expect(MostlyGoodMetrics.getVariant('button-color')).toBe('treatment');
+      });
+
+      it('should keep sticky assignments on a plain resetIdentity', async () => {
+        const instance = configureLocal();
+        await MostlyGoodMetrics.ready();
+
+        expect(MostlyGoodMetrics.getVariant('button-color')).toBe('control');
+
+        instance.resetIdentity();
+        // '$anon_abc123def456' would bucket to 'treatment', but the sticky
+        // assignment must survive a plain logout
+        instance.identify('$anon_abc123def456');
+
+        expect(MostlyGoodMetrics.getVariant('button-color')).toBe('control');
+      });
+
+      it('should clear sticky assignments on resetAnonymousId', async () => {
+        const instance = configureLocal();
+        await MostlyGoodMetrics.ready();
+
+        expect(MostlyGoodMetrics.getVariant('button-color')).toBe('control');
+        await waitForAsync();
+
+        instance.resetAnonymousId();
+        await waitForAsync();
+
+        expect(['{}', null]).toContain(experimentStorage.getItem(ASSIGNMENTS_KEY));
+
+        // Next resolution re-buckets - golden vector for the identified ID
+        instance.identify('$anon_abc123def456');
+        expect(MostlyGoodMetrics.getVariant('button-color')).toBe('treatment');
+      });
+    });
+
+    describe('opt-out gating', () => {
+      it('should not fetch local experiment configs while opted out', async () => {
+        const fetchMock = jest.fn();
+        global.fetch = fetchMock as unknown as typeof global.fetch;
+
+        configureLocal({ localExperiments: undefined, optedOutByDefault: true });
+        await MostlyGoodMetrics.ready();
+
+        expect(fetchMock).not.toHaveBeenCalled();
+      });
+
+      it('should fetch local experiment configs after optIn', async () => {
+        const fetchMock = jest.fn().mockResolvedValue({
+          ok: true,
+          json: async () => ({ experiments: localExperiments }),
+        });
+        global.fetch = fetchMock as unknown as typeof global.fetch;
+
+        configureLocal({ localExperiments: undefined, optedOutByDefault: true });
+        await MostlyGoodMetrics.ready();
+        expect(fetchMock).not.toHaveBeenCalled();
+
+        MostlyGoodMetrics.optIn();
+        await MostlyGoodMetrics.ready();
+        await waitForAsync();
+
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(MostlyGoodMetrics.getVariant('button-color')).toBe('control');
+      });
+
+      it('should still bucket from inline configs while opted out, without exposures or dedup state', async () => {
+        const fetchMock = jest.fn();
+        global.fetch = fetchMock as unknown as typeof global.fetch;
+
+        configureLocal({ optedOutByDefault: true });
+        await MostlyGoodMetrics.ready();
+
+        // Bucketing still works from inline configs
+        expect(MostlyGoodMetrics.getVariant('button-color')).toBe('control');
+        await waitForAsync();
+
+        // ...but no exposure event was tracked
+        expect(await storage.eventCount()).toBe(0);
+        // ...and no exposure dedup state was recorded
+        expect(experimentStorage.getItem('mgm_experiment_exposures')).toBeNull();
+        expect(fetchMock).not.toHaveBeenCalled();
+
+        // After optIn, the exposure fires normally
+        MostlyGoodMetrics.optIn();
+        expect(MostlyGoodMetrics.getVariant('button-color')).toBe('control');
+        await waitForAsync();
+
+        const events = await storage.fetchEvents(100);
+        const exposures = events.filter((e) => e.name === '$experiment_exposure');
+        expect(exposures).toHaveLength(1);
+        expect(exposures[0].properties?.['$experiment_name']).toBe('button-color');
+        expect(exposures[0].properties?.['$variant']).toBe('control');
+      });
+    });
+
+    describe('memory persistence mode', () => {
+      it('should keep local experiment state fully in memory', async () => {
+        // No explicit experimentStorage: memory mode must select the
+        // in-memory adapter for assignments and configs too
+        MostlyGoodMetrics.configure({
+          apiKey: 'test-key',
+          storage,
+          networkClient,
+          trackAppLifecycleEvents: false,
+          experimentMode: 'local',
+          persistence: 'memory',
+          localExperiments,
+        });
+        await MostlyGoodMetrics.ready();
+
+        expect(MostlyGoodMetrics.getVariant('button-color')).toBeTruthy();
+        await waitForAsync();
+
+        // Nothing experiment-related was written to localStorage
+        const experimentKeys = Object.keys(localStorage).filter((key) => key.startsWith('mgm_'));
+        expect(experimentKeys).toEqual([]);
       });
     });
   });

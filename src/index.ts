@@ -52,6 +52,9 @@ export type {
   UserProfile,
   Experiment,
   ExperimentsResponse,
+  ExperimentMode,
+  MGMExperimentConfig,
+  ExperimentConfigsResponse,
 } from './types';
 
 // Error class
@@ -93,6 +96,9 @@ export {
   getDeviceModel,
   isDoNotTrackEnabled,
 } from './utils';
+
+// Local experiment enrollment (deterministic on-device bucketing)
+export { sha256, utf8Encode, computeExperimentBucket } from './sha256';
 
 // Logger (for debugging)
 export { logger } from './logger';

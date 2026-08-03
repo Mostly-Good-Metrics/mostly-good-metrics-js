@@ -217,6 +217,8 @@ export function resolveConfiguration(config: MGMConfiguration): ResolvedConfigur
     respectDoNotTrack: config.respectDoNotTrack ?? DefaultConfiguration.respectDoNotTrack,
     collectDeviceProperties:
       config.collectDeviceProperties ?? DefaultConfiguration.collectDeviceProperties,
+    experimentMode: config.experimentMode ?? DefaultConfiguration.experimentMode,
+    localExperiments: config.localExperiments,
     storage: config.storage,
     networkClient: config.networkClient,
     experimentStorage: config.experimentStorage,
