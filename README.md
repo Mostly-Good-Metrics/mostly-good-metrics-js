@@ -238,7 +238,7 @@ For more control, pass additional configuration:
 ```typescript
 MostlyGoodMetrics.configure({
   apiKey: 'mgm_proj_your_api_key',
-  baseURL: 'https://mostlygoodmetrics.com',
+  baseURL: 'https://ingest.mostlygoodmetrics.com',
   environment: 'production',
   appVersion: '1.0.0',
   maxBatchSize: 100,
@@ -254,7 +254,7 @@ MostlyGoodMetrics.configure({
 | Option | Default | Description |
 |--------|---------|-------------|
 | `apiKey` | - | **Required.** Your API key |
-| `baseURL` | `https://mostlygoodmetrics.com` | API endpoint |
+| `baseURL` | `https://ingest.mostlygoodmetrics.com` | API endpoint |
 | `environment` | `"production"` | Environment name |
 | `appVersion` | - | App version string (required for install/update tracking) |
 | `maxBatchSize` | `100` | Events per batch (1-1000) |
