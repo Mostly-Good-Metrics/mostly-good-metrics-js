@@ -109,9 +109,50 @@ export interface MGMConfiguration {
    * Disable cookie storage entirely.
    * When true, only localStorage will be used (no cross-subdomain tracking).
    * Useful for GDPR compliance or privacy-focused applications.
+   * Alias for `persistence: 'localStorage'`; ignored when `persistence` is set.
    * @default false
    */
   disableCookies?: boolean;
+
+  /**
+   * Where the SDK persists its state (anonymous ID, event queue, super
+   * properties, opt-out flag, ...):
+   * - `'localStorage+cookie'`: localStorage plus a cookie for the anonymous ID
+   *   (enables cross-subdomain tracking). The default.
+   * - `'localStorage'`: localStorage only, no cookies (same as
+   *   `disableCookies: true`).
+   * - `'memory'`: nothing is written to localStorage or cookies; all state is
+   *   held in memory and lost on reload. For consent-first or cookieless sites.
+   * @default 'localStorage+cookie'
+   */
+  persistence?: PersistenceMode;
+
+  /**
+   * Start opted out of tracking until `optIn()` is called.
+   * Useful for consent-first sites: configure the SDK up front, then call
+   * `optIn()` once the user consents. A previously persisted opt-in/opt-out
+   * choice (from `optIn()`/`optOut()`) takes precedence over this default.
+   * @default false
+   */
+  optedOutByDefault?: boolean;
+
+  /**
+   * Respect the browser's privacy signals. When true, the SDK treats
+   * `navigator.doNotTrack === '1'` or `navigator.globalPrivacyControl === true`
+   * as opted out from initialization. An explicit persisted `optIn()` choice
+   * takes precedence.
+   * @default false
+   */
+  respectDoNotTrack?: boolean;
+
+  /**
+   * Collect device/browser properties and locale context.
+   * When false, `$device_type` and `$device_model` are omitted from event
+   * properties and `locale`/`timezone` are omitted from events and context.
+   * Platform, OS version and app version are still sent.
+   * @default true
+   */
+  collectDeviceProperties?: boolean;
 
   /**
    * Custom storage adapter. If not provided, uses localStorage in browsers
@@ -309,6 +350,26 @@ export interface MGMEventsPayload {
  * Supported platforms (the actual OS/runtime).
  */
 export type Platform = 'web' | 'ios' | 'android' | 'node';
+
+/**
+ * Where the SDK persists its state.
+ * @see MGMConfiguration.persistence
+ */
+export type PersistenceMode = 'localStorage+cookie' | 'localStorage' | 'memory';
+
+/**
+ * Options for resetIdentity().
+ */
+export interface ResetIdentityOptions {
+  /**
+   * Full "forget me": in addition to clearing the user ID and identify
+   * debounce state, also rotate the anonymous ID, purge queued (unsent)
+   * events, clear super properties and clear the cached experiment
+   * variants/exposures.
+   * @default false
+   */
+  clearAnonymousId?: boolean;
+}
 
 /**
  * SDK identifiers.
@@ -589,6 +650,10 @@ export const DefaultConfiguration = {
   maxStoredEvents: 10000,
   enableDebugLogging: false,
   trackAppLifecycleEvents: false,
+  persistence: 'localStorage+cookie' as PersistenceMode,
+  optedOutByDefault: false,
+  respectDoNotTrack: false,
+  collectDeviceProperties: true,
   experimentMode: 'server' as ExperimentMode,
 } as const;
 

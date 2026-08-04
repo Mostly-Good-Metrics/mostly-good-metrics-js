@@ -40,6 +40,8 @@ export type {
   MGMEventContext,
   MGMEventsPayload,
   Platform,
+  PersistenceMode,
+  ResetIdentityOptions,
   SDK,
   DeviceType,
   MGMErrorType,
@@ -92,6 +94,7 @@ export {
   detectDeviceType,
   getOSVersion,
   getDeviceModel,
+  isDoNotTrackEnabled,
 } from './utils';
 
 // Local experiment enrollment (deterministic on-device bucketing)

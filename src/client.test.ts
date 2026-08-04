@@ -1783,6 +1783,504 @@ describe('MostlyGoodMetrics', () => {
     });
   });
 
+  describe('privacy controls', () => {
+    const OPT_OUT_KEY = 'mostlygoodmetrics_opt_out';
+    const ANONYMOUS_ID_KEY = 'mostlygoodmetrics_anonymous_id';
+
+    const clearCookie = (name: string) => {
+      document.cookie = `${name}=; path=/; max-age=0`;
+    };
+
+    const clearPersistedState = () => {
+      localStorage.clear();
+      clearCookie(OPT_OUT_KEY);
+      clearCookie(ANONYMOUS_ID_KEY);
+    };
+
+    const waitForAsync = () => new Promise((resolve) => setTimeout(resolve, 10));
+
+    beforeEach(() => {
+      clearPersistedState();
+    });
+
+    afterEach(() => {
+      clearPersistedState();
+    });
+
+    describe('optOut / optIn', () => {
+      beforeEach(() => {
+        MostlyGoodMetrics.configure({
+          apiKey: 'test-key',
+          storage,
+          networkClient,
+          trackAppLifecycleEvents: false,
+        });
+      });
+
+      it('should not be opted out by default', () => {
+        expect(MostlyGoodMetrics.isOptedOut()).toBe(false);
+      });
+
+      it('should stop tracking after optOut', async () => {
+        MostlyGoodMetrics.optOut();
+
+        MostlyGoodMetrics.track('after_opt_out');
+        await waitForAsync();
+
+        expect(MostlyGoodMetrics.isOptedOut()).toBe(true);
+        expect(await storage.eventCount()).toBe(0);
+      });
+
+      it('should purge queued events on optOut', async () => {
+        MostlyGoodMetrics.track('queued_event');
+        await waitForAsync();
+        expect(await storage.eventCount()).toBe(1);
+
+        MostlyGoodMetrics.optOut();
+        await waitForAsync();
+
+        expect(await storage.eventCount()).toBe(0);
+      });
+
+      it('should no-op identify while opted out', async () => {
+        MostlyGoodMetrics.optOut();
+
+        MostlyGoodMetrics.identify('user_123', { email: 'user@example.com' });
+        await waitForAsync();
+
+        expect(MostlyGoodMetrics.shared?.userId).toBeNull();
+        expect(await storage.eventCount()).toBe(0);
+      });
+
+      it('should no-op flush while opted out', async () => {
+        MostlyGoodMetrics.track('event_before');
+        await waitForAsync();
+
+        MostlyGoodMetrics.optOut();
+        await MostlyGoodMetrics.flush();
+
+        expect(networkClient.sentPayloads).toHaveLength(0);
+      });
+
+      it('should resume tracking after optIn', async () => {
+        MostlyGoodMetrics.optOut();
+        MostlyGoodMetrics.track('ignored');
+        await waitForAsync();
+        expect(await storage.eventCount()).toBe(0);
+
+        MostlyGoodMetrics.optIn();
+        MostlyGoodMetrics.track('tracked');
+        await waitForAsync();
+
+        expect(MostlyGoodMetrics.isOptedOut()).toBe(false);
+        expect(await storage.eventCount()).toBe(1);
+      });
+
+      it('should persist opt-out across a reload (new instance)', async () => {
+        MostlyGoodMetrics.optOut();
+        MostlyGoodMetrics.reset();
+
+        const freshStorage = new InMemoryEventStorage(100);
+        MostlyGoodMetrics.configure({
+          apiKey: 'test-key',
+          storage: freshStorage,
+          networkClient,
+          trackAppLifecycleEvents: false,
+        });
+
+        expect(MostlyGoodMetrics.isOptedOut()).toBe(true);
+
+        MostlyGoodMetrics.track('still_ignored');
+        await waitForAsync();
+        expect(await freshStorage.eventCount()).toBe(0);
+      });
+
+      it('should persist opt-out in localStorage', () => {
+        MostlyGoodMetrics.optOut();
+        expect(localStorage.getItem(OPT_OUT_KEY)).toBe('true');
+
+        MostlyGoodMetrics.optIn();
+        expect(localStorage.getItem(OPT_OUT_KEY)).toBe('false');
+      });
+
+      it('should return false from static isOptedOut when not configured', () => {
+        MostlyGoodMetrics.reset();
+        expect(MostlyGoodMetrics.isOptedOut()).toBe(false);
+      });
+    });
+
+    describe('optedOutByDefault', () => {
+      it('should start opted out when optedOutByDefault is true', async () => {
+        MostlyGoodMetrics.configure({
+          apiKey: 'test-key',
+          storage,
+          networkClient,
+          optedOutByDefault: true,
+          trackAppLifecycleEvents: false,
+        });
+
+        expect(MostlyGoodMetrics.isOptedOut()).toBe(true);
+
+        MostlyGoodMetrics.track('consent_first');
+        await waitForAsync();
+        expect(await storage.eventCount()).toBe(0);
+      });
+
+      it('should let a persisted optIn override optedOutByDefault', () => {
+        MostlyGoodMetrics.configure({
+          apiKey: 'test-key',
+          storage,
+          networkClient,
+          optedOutByDefault: true,
+          trackAppLifecycleEvents: false,
+        });
+        MostlyGoodMetrics.optIn();
+        MostlyGoodMetrics.reset();
+
+        MostlyGoodMetrics.configure({
+          apiKey: 'test-key',
+          storage: new InMemoryEventStorage(100),
+          networkClient,
+          optedOutByDefault: true,
+          trackAppLifecycleEvents: false,
+        });
+
+        expect(MostlyGoodMetrics.isOptedOut()).toBe(false);
+      });
+    });
+
+    describe('respectDoNotTrack', () => {
+      const setNavigatorValue = (property: string, value: unknown) => {
+        Object.defineProperty(window.navigator, property, {
+          value,
+          configurable: true,
+        });
+      };
+
+      afterEach(() => {
+        setNavigatorValue('doNotTrack', undefined);
+        setNavigatorValue('globalPrivacyControl', undefined);
+      });
+
+      it('should opt out when doNotTrack is "1" and respectDoNotTrack is true', async () => {
+        setNavigatorValue('doNotTrack', '1');
+
+        MostlyGoodMetrics.configure({
+          apiKey: 'test-key',
+          storage,
+          networkClient,
+          respectDoNotTrack: true,
+          trackAppLifecycleEvents: false,
+        });
+
+        expect(MostlyGoodMetrics.isOptedOut()).toBe(true);
+
+        MostlyGoodMetrics.track('dnt_event');
+        await waitForAsync();
+        expect(await storage.eventCount()).toBe(0);
+      });
+
+      it('should opt out when globalPrivacyControl is true and respectDoNotTrack is true', () => {
+        setNavigatorValue('globalPrivacyControl', true);
+
+        MostlyGoodMetrics.configure({
+          apiKey: 'test-key',
+          storage,
+          networkClient,
+          respectDoNotTrack: true,
+          trackAppLifecycleEvents: false,
+        });
+
+        expect(MostlyGoodMetrics.isOptedOut()).toBe(true);
+      });
+
+      it('should ignore doNotTrack when respectDoNotTrack is false (default)', () => {
+        setNavigatorValue('doNotTrack', '1');
+        setNavigatorValue('globalPrivacyControl', true);
+
+        MostlyGoodMetrics.configure({
+          apiKey: 'test-key',
+          storage,
+          networkClient,
+          trackAppLifecycleEvents: false,
+        });
+
+        expect(MostlyGoodMetrics.isOptedOut()).toBe(false);
+      });
+
+      it('should let a persisted optIn override the Do Not Track signal', () => {
+        setNavigatorValue('doNotTrack', '1');
+
+        MostlyGoodMetrics.configure({
+          apiKey: 'test-key',
+          storage,
+          networkClient,
+          respectDoNotTrack: true,
+          trackAppLifecycleEvents: false,
+        });
+        MostlyGoodMetrics.optIn();
+        MostlyGoodMetrics.reset();
+
+        MostlyGoodMetrics.configure({
+          apiKey: 'test-key',
+          storage: new InMemoryEventStorage(100),
+          networkClient,
+          respectDoNotTrack: true,
+          trackAppLifecycleEvents: false,
+        });
+
+        expect(MostlyGoodMetrics.isOptedOut()).toBe(false);
+      });
+    });
+
+    describe('resetAnonymousId', () => {
+      it('should generate and persist a new anonymous ID', () => {
+        const instance = MostlyGoodMetrics.configure({
+          apiKey: 'test-key',
+          storage,
+          networkClient,
+          trackAppLifecycleEvents: false,
+        });
+
+        const originalId = instance.anonymousId;
+        const newId = instance.resetAnonymousId();
+
+        expect(newId).not.toBe(originalId);
+        expect(newId).toMatch(/^\$anon_/);
+        expect(instance.anonymousId).toBe(newId);
+        expect(localStorage.getItem(ANONYMOUS_ID_KEY)).toBe(newId);
+      });
+
+      it('should return null from the static method when not configured', () => {
+        expect(MostlyGoodMetrics.resetAnonymousId()).toBeNull();
+      });
+    });
+
+    describe('resetIdentity({ clearAnonymousId: true })', () => {
+      let originalFetch: typeof global.fetch;
+
+      beforeEach(() => {
+        originalFetch = global.fetch;
+        global.fetch = jest.fn().mockResolvedValue({
+          ok: true,
+          json: async () => ({ assigned_variants: {} }),
+        }) as unknown as typeof global.fetch;
+      });
+
+      afterEach(() => {
+        global.fetch = originalFetch;
+      });
+
+      it('should keep the anonymous ID on a plain resetIdentity', () => {
+        const instance = MostlyGoodMetrics.configure({
+          apiKey: 'test-key',
+          storage,
+          networkClient,
+          trackAppLifecycleEvents: false,
+        });
+
+        const anonId = instance.anonymousId;
+        instance.identify('user_123');
+        instance.resetIdentity();
+
+        expect(instance.userId).toBeNull();
+        expect(instance.anonymousId).toBe(anonId);
+      });
+
+      it('should clear all identity and cached state (forget me)', async () => {
+        const instance = MostlyGoodMetrics.configure({
+          apiKey: 'test-key',
+          storage,
+          networkClient,
+          trackAppLifecycleEvents: false,
+        });
+
+        instance.identify('user_123', { email: 'user@example.com' });
+        instance.setSuperProperty('plan', 'pro');
+        instance.track('some_event');
+        await waitForAsync();
+
+        const originalAnonId = instance.anonymousId;
+        expect(await storage.eventCount()).toBeGreaterThan(0);
+
+        instance.resetIdentity({ clearAnonymousId: true });
+        await waitForAsync();
+
+        // User identity cleared
+        expect(instance.userId).toBeNull();
+        expect(localStorage.getItem('mostlygoodmetrics_user_id')).toBeNull();
+
+        // Anonymous ID rotated
+        expect(instance.anonymousId).not.toBe(originalAnonId);
+
+        // Queued events purged
+        expect(await storage.eventCount()).toBe(0);
+
+        // Super properties cleared
+        expect(instance.getSuperProperties()).toEqual({});
+
+        // Identify debounce state cleared
+        expect(localStorage.getItem('mostlygoodmetrics_identify_hash')).toBeNull();
+        expect(localStorage.getItem('mostlygoodmetrics_identify_timestamp')).toBeNull();
+
+        // Experiment cache no longer references the old identity
+        const cachedVariants = localStorage.getItem('mgm_experiment_variants');
+        if (cachedVariants) {
+          const parsed = JSON.parse(cachedVariants) as { userId: string };
+          expect(parsed.userId).not.toBe('user_123');
+          expect(parsed.userId).not.toBe(originalAnonId);
+        }
+
+        // Exposure dedup flags cleared
+        const exposures = localStorage.getItem('mgm_experiment_exposures');
+        expect([null, '', '[]']).toContain(exposures);
+      });
+    });
+
+    describe('persistence modes', () => {
+      it('should persist nothing in memory mode', async () => {
+        MostlyGoodMetrics.configure({
+          apiKey: 'test-key',
+          networkClient,
+          persistence: 'memory',
+          trackAppLifecycleEvents: false,
+        });
+        const instance = MostlyGoodMetrics.shared;
+        expect(instance).not.toBeNull();
+
+        instance?.track('memory_event');
+        instance?.setSuperProperty('plan', 'pro');
+        instance?.identify('memory_user');
+        instance?.optOut();
+        await waitForAsync();
+
+        // Anonymous ID exists but is not persisted anywhere
+        expect(instance?.anonymousId).toBeTruthy();
+
+        const mgmKeys = Object.keys(localStorage).filter((key) =>
+          key.startsWith('mostlygoodmetrics')
+        );
+        expect(mgmKeys).toEqual([]);
+        expect(document.cookie).not.toContain('mostlygoodmetrics');
+      });
+
+      it('should keep the in-session opt-out choice without writing it anywhere in memory mode', () => {
+        MostlyGoodMetrics.configure({
+          apiKey: 'test-key',
+          networkClient,
+          persistence: 'memory',
+          trackAppLifecycleEvents: false,
+        });
+        MostlyGoodMetrics.optOut();
+        MostlyGoodMetrics.reset();
+
+        // Within the same JS session the in-memory choice is retained
+        // (a real page reload starts fresh - nothing durable was written)
+        MostlyGoodMetrics.configure({
+          apiKey: 'test-key',
+          networkClient,
+          persistence: 'memory',
+          trackAppLifecycleEvents: false,
+        });
+
+        expect(MostlyGoodMetrics.isOptedOut()).toBe(true);
+        expect(localStorage.getItem(OPT_OUT_KEY)).toBeNull();
+        expect(document.cookie).not.toContain(OPT_OUT_KEY);
+      });
+
+      it('should keep disableCookies working as an alias for localStorage-only', () => {
+        MostlyGoodMetrics.configure({
+          apiKey: 'test-key',
+          storage,
+          networkClient,
+          disableCookies: true,
+          trackAppLifecycleEvents: false,
+        });
+
+        expect(MostlyGoodMetrics.shared?.configuration.persistence).toBe('localStorage');
+        expect(localStorage.getItem(ANONYMOUS_ID_KEY)).toBeTruthy();
+        expect(document.cookie).not.toContain(ANONYMOUS_ID_KEY);
+      });
+
+      it('should prefer an explicit persistence option over disableCookies', () => {
+        MostlyGoodMetrics.configure({
+          apiKey: 'test-key',
+          networkClient,
+          disableCookies: true,
+          persistence: 'memory',
+          trackAppLifecycleEvents: false,
+        });
+
+        expect(MostlyGoodMetrics.shared?.configuration.persistence).toBe('memory');
+      });
+    });
+
+    describe('collectDeviceProperties', () => {
+      it('should include device properties and locale context by default', async () => {
+        MostlyGoodMetrics.configure({
+          apiKey: 'test-key',
+          storage,
+          networkClient,
+          trackAppLifecycleEvents: false,
+        });
+
+        MostlyGoodMetrics.track('default_event');
+        await waitForAsync();
+
+        const events = await storage.fetchEvents(1);
+        expect(events[0].properties?.['$device_type']).toBeDefined();
+        expect(events[0].properties?.['$device_model']).toBeDefined();
+        expect(events[0].locale).toBeDefined();
+        expect(events[0].timezone).toBeDefined();
+      });
+
+      it('should omit device properties and locale context when disabled', async () => {
+        MostlyGoodMetrics.configure({
+          apiKey: 'test-key',
+          storage,
+          networkClient,
+          collectDeviceProperties: false,
+          appVersion: '1.2.3',
+          trackAppLifecycleEvents: false,
+        });
+
+        MostlyGoodMetrics.track('minimal_event');
+        await waitForAsync();
+
+        const events = await storage.fetchEvents(1);
+        expect(events[0].properties?.['$device_type']).toBeUndefined();
+        expect(events[0].properties?.['$device_model']).toBeUndefined();
+        expect(events[0].locale).toBeUndefined();
+        expect(events[0].timezone).toBeUndefined();
+
+        // Platform, OS version and app version are still sent
+        // (detectPlatform resolves to 'node' under Jest)
+        expect(events[0].platform).toBeDefined();
+        expect(events[0].app_version).toBe('1.2.3');
+        expect(events[0].properties?.['$sdk']).toBe('javascript');
+      });
+
+      it('should omit locale and timezone from the flush context when disabled', async () => {
+        MostlyGoodMetrics.configure({
+          apiKey: 'test-key',
+          storage,
+          networkClient,
+          collectDeviceProperties: false,
+          trackAppLifecycleEvents: false,
+        });
+
+        MostlyGoodMetrics.track('context_event');
+        await waitForAsync();
+        await MostlyGoodMetrics.flush();
+
+        expect(networkClient.sentPayloads).toHaveLength(1);
+        expect(networkClient.sentPayloads[0].context.locale).toBeUndefined();
+        expect(networkClient.sentPayloads[0].context.timezone).toBeUndefined();
+        expect(networkClient.sentPayloads[0].context.platform).toBeDefined();
+      });
+    });
+  });
+
   describe('local experiment enrollment', () => {
     const EXPERIMENT_UUID = '7b1e8a90-4c2d-4f6a-9e3b-2a1d5c8f0e71';
     const MULTI_VARIANT_UUID = '3f9c2d11-8b7a-4e5f-a0c6-91d2e3f4a5b6';
@@ -1992,6 +2490,193 @@ describe('MostlyGoodMetrics', () => {
 
       expect(MostlyGoodMetrics.getVariant('nonexistent')).toBeNull();
       expect(MostlyGoodMetrics.getVariant('nonexistent', 'fallback')).toBe('fallback');
+    });
+  });
+
+  describe('privacy controls x local experiments', () => {
+    // Golden vectors: experiment 7b1e8a90-... buckets 'user_123' -> 'control'
+    // and '$anon_abc123def456' -> 'treatment'
+    const EXPERIMENT_UUID = '7b1e8a90-4c2d-4f6a-9e3b-2a1d5c8f0e71';
+    const ASSIGNMENTS_KEY = 'mgm_local_experiment_assignments';
+    const OPT_OUT_KEY = 'mostlygoodmetrics_opt_out';
+
+    const localExperiments: MGMExperimentConfig[] = [
+      { id: EXPERIMENT_UUID, name: 'button-color', variants: ['control', 'treatment'] },
+    ];
+
+    let experimentStorage: InMemoryExperimentStorage;
+    let originalFetch: typeof global.fetch;
+
+    const waitForAsync = () => new Promise((resolve) => setTimeout(resolve, 10));
+
+    const clearPersistedState = () => {
+      localStorage.clear();
+      document.cookie = `${OPT_OUT_KEY}=; path=/; max-age=0`;
+      document.cookie = 'mostlygoodmetrics_anonymous_id=; path=/; max-age=0';
+    };
+
+    beforeEach(() => {
+      experimentStorage = new InMemoryExperimentStorage();
+      originalFetch = global.fetch;
+      clearPersistedState();
+    });
+
+    afterEach(() => {
+      global.fetch = originalFetch;
+      clearPersistedState();
+    });
+
+    const configureLocal = (overrides: Record<string, unknown> = {}) =>
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        experimentStorage,
+        trackAppLifecycleEvents: false,
+        experimentMode: 'local',
+        anonymousId: 'user_123',
+        localExperiments,
+        ...overrides,
+      });
+
+    describe('forget-me and anonymous ID rotation', () => {
+      it('should clear sticky assignments on forget-me and re-bucket the new identity', async () => {
+        const instance = configureLocal();
+        await MostlyGoodMetrics.ready();
+
+        // Golden vector: user_123 -> 'control'
+        expect(MostlyGoodMetrics.getVariant('button-color')).toBe('control');
+        await waitForAsync();
+        expect(JSON.parse(experimentStorage.getItem(ASSIGNMENTS_KEY) as string)).toEqual({
+          [EXPERIMENT_UUID]: 'control',
+        });
+
+        instance.resetIdentity({ clearAnonymousId: true });
+        await waitForAsync();
+
+        // Persisted assignments cleared
+        expect(['{}', null]).toContain(experimentStorage.getItem(ASSIGNMENTS_KEY));
+
+        // Re-bucketed under the new identity - golden vector:
+        // '$anon_abc123def456' -> 'treatment'
+        instance.identify('$anon_abc123def456');
+        expect(MostlyGoodMetrics.getVariant('button-color')).toBe('treatment');
+      });
+
+      it('should keep sticky assignments on a plain resetIdentity', async () => {
+        const instance = configureLocal();
+        await MostlyGoodMetrics.ready();
+
+        expect(MostlyGoodMetrics.getVariant('button-color')).toBe('control');
+
+        instance.resetIdentity();
+        // '$anon_abc123def456' would bucket to 'treatment', but the sticky
+        // assignment must survive a plain logout
+        instance.identify('$anon_abc123def456');
+
+        expect(MostlyGoodMetrics.getVariant('button-color')).toBe('control');
+      });
+
+      it('should clear sticky assignments on resetAnonymousId', async () => {
+        const instance = configureLocal();
+        await MostlyGoodMetrics.ready();
+
+        expect(MostlyGoodMetrics.getVariant('button-color')).toBe('control');
+        await waitForAsync();
+
+        instance.resetAnonymousId();
+        await waitForAsync();
+
+        expect(['{}', null]).toContain(experimentStorage.getItem(ASSIGNMENTS_KEY));
+
+        // Next resolution re-buckets - golden vector for the identified ID
+        instance.identify('$anon_abc123def456');
+        expect(MostlyGoodMetrics.getVariant('button-color')).toBe('treatment');
+      });
+    });
+
+    describe('opt-out gating', () => {
+      it('should not fetch local experiment configs while opted out', async () => {
+        const fetchMock = jest.fn();
+        global.fetch = fetchMock as unknown as typeof global.fetch;
+
+        configureLocal({ localExperiments: undefined, optedOutByDefault: true });
+        await MostlyGoodMetrics.ready();
+
+        expect(fetchMock).not.toHaveBeenCalled();
+      });
+
+      it('should fetch local experiment configs after optIn', async () => {
+        const fetchMock = jest.fn().mockResolvedValue({
+          ok: true,
+          json: async () => ({ experiments: localExperiments }),
+        });
+        global.fetch = fetchMock as unknown as typeof global.fetch;
+
+        configureLocal({ localExperiments: undefined, optedOutByDefault: true });
+        await MostlyGoodMetrics.ready();
+        expect(fetchMock).not.toHaveBeenCalled();
+
+        MostlyGoodMetrics.optIn();
+        await MostlyGoodMetrics.ready();
+        await waitForAsync();
+
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(MostlyGoodMetrics.getVariant('button-color')).toBe('control');
+      });
+
+      it('should still bucket from inline configs while opted out, without exposures or dedup state', async () => {
+        const fetchMock = jest.fn();
+        global.fetch = fetchMock as unknown as typeof global.fetch;
+
+        configureLocal({ optedOutByDefault: true });
+        await MostlyGoodMetrics.ready();
+
+        // Bucketing still works from inline configs
+        expect(MostlyGoodMetrics.getVariant('button-color')).toBe('control');
+        await waitForAsync();
+
+        // ...but no exposure event was tracked
+        expect(await storage.eventCount()).toBe(0);
+        // ...and no exposure dedup state was recorded
+        expect(experimentStorage.getItem('mgm_experiment_exposures')).toBeNull();
+        expect(fetchMock).not.toHaveBeenCalled();
+
+        // After optIn, the exposure fires normally
+        MostlyGoodMetrics.optIn();
+        expect(MostlyGoodMetrics.getVariant('button-color')).toBe('control');
+        await waitForAsync();
+
+        const events = await storage.fetchEvents(100);
+        const exposures = events.filter((e) => e.name === '$experiment_exposure');
+        expect(exposures).toHaveLength(1);
+        expect(exposures[0].properties?.['$experiment_name']).toBe('button-color');
+        expect(exposures[0].properties?.['$variant']).toBe('control');
+      });
+    });
+
+    describe('memory persistence mode', () => {
+      it('should keep local experiment state fully in memory', async () => {
+        // No explicit experimentStorage: memory mode must select the
+        // in-memory adapter for assignments and configs too
+        MostlyGoodMetrics.configure({
+          apiKey: 'test-key',
+          storage,
+          networkClient,
+          trackAppLifecycleEvents: false,
+          experimentMode: 'local',
+          persistence: 'memory',
+          localExperiments,
+        });
+        await MostlyGoodMetrics.ready();
+
+        expect(MostlyGoodMetrics.getVariant('button-color')).toBeTruthy();
+        await waitForAsync();
+
+        // Nothing experiment-related was written to localStorage
+        const experimentKeys = Object.keys(localStorage).filter((key) => key.startsWith('mgm_'));
+        expect(experimentKeys).toEqual([]);
+      });
     });
   });
 });
