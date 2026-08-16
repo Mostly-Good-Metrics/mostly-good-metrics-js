@@ -94,6 +94,8 @@ MostlyGoodMetrics.resetIdentity();
 // After reset: user_id = new auto-generated UUID
 ```
 
+When `identify()` sends a `$identify` event (i.e. when you pass profile data such as `email` or `name`), the event's `properties` include `$anonymous_id` set to the anonymous ID the user had before `identify()` was called. Its `user_id` is the newly-identified ID. This lets the backend link a user's earlier anonymous events to their identified ID. `$anonymous_id` is omitted when there is no distinct anonymous ID (e.g. the anonymous ID already equals the identified ID).
+
 ### Cross-Subdomain Tracking
 
 To track users across subdomains (e.g., `app.example.com` and `blog.example.com`), configure a shared cookie domain:

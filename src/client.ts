@@ -521,6 +521,15 @@ export class MostlyGoodMetrics {
         properties.name = profile.name;
       }
 
+      // Include the stored anonymous ID so the backend can link the user's
+      // pre-identify (anonymous) events to their newly-identified user_id.
+      // Only send it when a distinct anonymous ID exists - there is no point
+      // aliasing an ID to itself when the anon ID equals the identified user_id.
+      const anonymousId = this.anonymousIdValue;
+      if (anonymousId && anonymousId !== userId) {
+        properties.$anonymous_id = anonymousId;
+      }
+
       // Track the $identify event
       this.track(SystemEvents.IDENTIFY, properties);
 
