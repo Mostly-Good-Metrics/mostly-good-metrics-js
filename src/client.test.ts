@@ -2491,6 +2491,87 @@ describe('MostlyGoodMetrics', () => {
       expect(MostlyGoodMetrics.getVariant('nonexistent')).toBeNull();
       expect(MostlyGoodMetrics.getVariant('nonexistent', 'fallback')).toBe('fallback');
     });
+
+    // Regression: local mode without inline configs relies on
+    // GET /v1/experiments/configs, which does not exist in the backend. It used
+    // to 404 silently and every getVariant() returned the fallback with no
+    // signal. Local mode must now fail LOUDLY instead.
+    describe('unsupported local mode fails loudly', () => {
+      let consoleErrorSpy: jest.SpyInstance;
+
+      beforeEach(() => {
+        consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+      });
+
+      afterEach(() => {
+        consoleErrorSpy.mockRestore();
+      });
+
+      it('surfaces an error (not a silent fallback) with no inline configs when the configs fetch fails', async () => {
+        // No inline configs -> the SDK falls back to the nonexistent
+        // GET /v1/experiments/configs endpoint. Simulate the network failing.
+        const fetchMock = jest.fn().mockRejectedValue(new Error('Network error'));
+        global.fetch = fetchMock as unknown as typeof global.fetch;
+
+        const instance = configureLocal({ localExperiments: undefined });
+
+        await expect(MostlyGoodMetrics.ready()).rejects.toThrow(/unsupported/i);
+
+        // The error state is observable...
+        expect(instance.experimentInitError).toBeInstanceOf(Error);
+        expect(instance.experimentInitError?.message).toContain('/v1/experiments/configs');
+        // ...and a prominent console.error was emitted.
+        expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
+        expect(consoleErrorSpy.mock.calls[0][0]).toContain('experimentMode');
+        expect(consoleErrorSpy.mock.calls[0][0]).toContain('does NOT exist');
+      });
+
+      it('surfaces an error when the configs fetch 404s', async () => {
+        const fetchMock = jest.fn().mockResolvedValue({
+          ok: false,
+          status: 404,
+          json: async () => ({}),
+        });
+        global.fetch = fetchMock as unknown as typeof global.fetch;
+
+        const instance = configureLocal({ localExperiments: undefined });
+
+        await expect(MostlyGoodMetrics.ready()).rejects.toThrow(/unsupported/i);
+
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(instance.experimentInitError).toBeInstanceOf(Error);
+        expect(instance.experimentInitError?.message).toContain('404');
+        expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
+
+        // getVariant still returns the fallback - but the developer was NOT
+        // left silently broken: ready() rejected and console.error fired.
+        expect(MostlyGoodMetrics.getVariant('button-color', 'fallback')).toBe('fallback');
+      });
+
+      it('does not affect server mode (ready resolves, no error, no console.error)', async () => {
+        const fetchMock = jest.fn().mockResolvedValue({
+          ok: true,
+          json: async () => ({ assigned_variants: { 'button-color': 'treatment' } }),
+        });
+        global.fetch = fetchMock as unknown as typeof global.fetch;
+
+        const instance = MostlyGoodMetrics.configure({
+          apiKey: 'test-key',
+          storage,
+          networkClient,
+          experimentStorage,
+          trackAppLifecycleEvents: false,
+          // experimentMode omitted -> defaults to 'server'
+          anonymousId: 'user_123',
+        });
+
+        await expect(MostlyGoodMetrics.ready()).resolves.toBeUndefined();
+
+        expect(instance.experimentInitError).toBeNull();
+        expect(consoleErrorSpy).not.toHaveBeenCalled();
+        expect(MostlyGoodMetrics.getVariant('button-color')).toBe('treatment');
+      });
+    });
   });
 
   describe('privacy controls x local experiments', () => {

@@ -461,19 +461,30 @@ Async adapters are fully supported - cache hydration completes before `ready()` 
 
 ## Local Experiment Enrollment
 
-By default, experiment variants are assigned by the server (`experimentMode: 'server'`), which sends the user ID with the experiments request. If you prefer that **no user identifier ever leaves the device** for experiment enrollment, switch to local mode:
+> ⚠️ **Local mode requires inline `localExperiments` and is otherwise unsupported.** Local mode is only functional when you pass the experiment configurations inline (see [Inline mode](#inline-mode-zero-network) below). Without inline configs it would fall back to `GET /v1/experiments/configs`, **an endpoint that does not currently exist in the backend** (pending a design decision). In that configuration the SDK now **fails loudly**: it logs a prominent `console.error` and `ready()` **rejects** (surfaced via `experimentInitError`) instead of silently returning fallbacks from every `getVariant()`. Use the default server mode unless you are supplying inline configs.
+
+By default, experiment variants are assigned by the server (`experimentMode: 'server'`), which sends the user ID with the experiments request. If you prefer that **no user identifier ever leaves the device** for experiment enrollment, switch to local mode **with inline configs**:
 
 ```typescript
 MostlyGoodMetrics.configure({
   apiKey: 'mgm_proj_your_api_key',
   experimentMode: 'local',
+  localExperiments: [
+    /* required - see Inline mode below */
+  ],
 });
 
-await MostlyGoodMetrics.ready();
+try {
+  await MostlyGoodMetrics.ready();
+} catch (err) {
+  // In local mode ready() rejects if enrollment cannot function
+  // (e.g. no inline configs were provided). Server mode never rejects.
+  console.error(err);
+}
 const variant = MostlyGoodMetrics.getVariant('button-color', 'control');
 ```
 
-In local mode the SDK fetches only the experiment *configurations* (`GET /v1/experiments/configs` - a list of `{ id, name, variants }` with no user-specific data; the request carries no `user_id` or `anonymous_id`), and assigns the variant on-device.
+In local mode the SDK reads the experiment *configurations* you provide inline (a list of `{ id, name, variants }` with no user-specific data - nothing about the user is sent) and assigns the variant on-device. A non-inline fetch of `GET /v1/experiments/configs` is **not supported** (the endpoint does not exist) and triggers the loud failure described above.
 
 ### Inline mode (zero network)
 

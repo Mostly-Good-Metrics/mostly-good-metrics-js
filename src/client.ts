@@ -77,6 +77,9 @@ export class MostlyGoodMetrics {
   private experimentsReadyResolve: (() => void) | null = null;
   private experimentsReadyPromise: Promise<void>;
   private trackedExposures = new Set<string>(); // (user, experiment, variant) exposure dedup
+  // Fatal experiment-init error (currently only local mode - see
+  // reportLocalModeUnsupported). When set, ready() rejects instead of resolving.
+  private experimentInitErrorValue: Error | null = null;
 
   /**
    * Private constructor - use `configure` to create an instance.
@@ -330,9 +333,13 @@ export class MostlyGoodMetrics {
   /**
    * Returns a promise that resolves when experiments have been loaded, or
    * after `timeoutMs` (default 5000) elapses - whichever comes first.
-   * Never rejects. Useful for waiting before calling getVariant() to ensure
-   * server-side experiments are available without blocking app startup on a
-   * hanging network.
+   * Never rejects in the default server mode. Useful for waiting before
+   * calling getVariant() to ensure server-side experiments are available
+   * without blocking app startup on a hanging network.
+   *
+   * In `experimentMode: 'local'` it REJECTS with a clear error if local
+   * enrollment cannot function (see `experimentInitError`), so a misconfigured
+   * local mode fails loudly instead of silently returning fallbacks.
    */
   static ready(timeoutMs: number = READY_DEFAULT_TIMEOUT_MS): Promise<void> {
     return MostlyGoodMetrics.instance?.ready(timeoutMs) ?? Promise.resolve();
@@ -375,6 +382,17 @@ export class MostlyGoodMetrics {
    */
   get configuration(): ResolvedConfiguration {
     return { ...this.config };
+  }
+
+  /**
+   * A fatal experiment-initialization error, or null if none.
+   *
+   * Currently only set for `experimentMode: 'local'` when local enrollment
+   * cannot function (see reportLocalModeUnsupported). When non-null, `ready()`
+   * rejects with this error rather than resolving. Server mode never sets it.
+   */
+  get experimentInitError(): Error | null {
+    return this.experimentInitErrorValue;
   }
 
   // =====================================================
@@ -804,18 +822,32 @@ export class MostlyGoodMetrics {
   /**
    * Returns a promise that resolves when experiments have been loaded, or
    * after `timeoutMs` (default 5000) elapses - whichever comes first.
-   * Never rejects.
+   * Never rejects in the default server mode.
    *
    * If the timeout fires first, getVariant() keeps returning fallbacks until
    * the in-flight fetch settles; a late response is still applied atomically,
    * so variants become available to subsequent calls.
+   *
+   * In `experimentMode: 'local'`, if local enrollment cannot function (see
+   * `experimentInitError`), this REJECTS with that error - both when the error
+   * is already known at call time and when it surfaces before the timeout
+   * fires - so opting into local mode can never leave a developer silently
+   * broken. Server mode never sets the error, so it still never rejects.
    */
   ready(timeoutMs: number = READY_DEFAULT_TIMEOUT_MS): Promise<void> {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
+      if (this.experimentInitErrorValue) {
+        reject(this.experimentInitErrorValue);
+        return;
+      }
       const timer = setTimeout(resolve, timeoutMs);
       void this.experimentsReadyPromise.then(() => {
         clearTimeout(timer);
-        resolve();
+        if (this.experimentInitErrorValue) {
+          reject(this.experimentInitErrorValue);
+        } else {
+          resolve();
+        }
       });
     });
   }
@@ -1167,6 +1199,16 @@ export class MostlyGoodMetrics {
    *    immediately and revalidated in the background at most hourly
    *    (same stale-while-revalidate pattern as server mode).
    * 3. A fetch of GET /v1/experiments/configs.
+   *
+   * UNSUPPORTED WITHOUT INLINE CONFIGS: local mode is not an approved,
+   * supported configuration - the agreed design is server assignment only.
+   * Source (3), GET /v1/experiments/configs, does NOT exist in the backend and
+   * 404s, so any local-mode setup without inline `localExperiments` (and no
+   * usable cache to serve) cannot resolve variants. Previously that failed
+   * silently (getVariant() just returned fallbacks); it now surfaces loudly via
+   * reportLocalModeUnsupported() below. Keep this path behind that loud failure
+   * until a backend `/v1/experiments/configs` design decision is made. Only
+   * inline `localExperiments` is a functional local configuration today.
    */
   private async initializeLocalExperiments(): Promise<void> {
     // Hydrate exposure flags and sticky assignments so both survive restarts
@@ -1236,7 +1278,12 @@ export class MostlyGoodMetrics {
       });
 
       if (!response.ok) {
-        logger.warn(`Failed to fetch local experiment configs: ${response.status}`);
+        // The backend has no GET /v1/experiments/configs endpoint, so this is
+        // the expected outcome (typically a 404). Fail loudly instead of
+        // silently returning fallbacks from getVariant().
+        this.reportLocalModeUnsupported(
+          `The GET /v1/experiments/configs request returned ${response.status}.`
+        );
         return;
       }
 
@@ -1248,11 +1295,47 @@ export class MostlyGoodMetrics {
 
       logger.debug(`Loaded ${experiments.length} local experiment configs`);
     } catch (e) {
-      logger.warn('Failed to fetch local experiment configs', e);
+      this.reportLocalModeUnsupported(
+        `The GET /v1/experiments/configs request failed: ${String(e)}.`
+      );
     } finally {
       clearTimeout(abortTimer);
       this.markExperimentsReady();
     }
+  }
+
+  /**
+   * Surface a fatal local-mode misconfiguration loudly.
+   *
+   * `experimentMode: 'local'` without inline `localExperiments` relies on
+   * GET /v1/experiments/configs, an endpoint that does not exist in the backend
+   * (it 404s). Before this, that failure was swallowed and every getVariant()
+   * silently returned its fallback. This records the error (exposed via
+   * `experimentInitError`, which makes `ready()` reject) and emits a prominent
+   * console.error so a developer who opts into local mode cannot be silently
+   * broken.
+   *
+   * Idempotent: only the first error is captured and logged, so a proactive
+   * report followed by a fetch-failure report does not double-log.
+   *
+   * TODO: local mode is unsupported pending a backend `/v1/experiments/configs`
+   * design decision. Do not rely on this path until that endpoint exists.
+   */
+  private reportLocalModeUnsupported(detail: string): void {
+    if (this.experimentInitErrorValue) {
+      return;
+    }
+    const message =
+      "MostlyGoodMetrics: experimentMode 'local' is unsupported without inline " +
+      '`localExperiments` configs. On-device bucketing otherwise depends on ' +
+      'GET /v1/experiments/configs, which does NOT exist in the backend, so ' +
+      'getVariant() would silently return fallbacks. ' +
+      detail +
+      ' Provide inline `localExperiments`, or use the default server experiment ' +
+      'mode. See `experimentInitError`; `ready()` rejects with this error.';
+    this.experimentInitErrorValue = new Error(message);
+    // Prominent, unmissable: this is a misconfiguration a developer opted into.
+    console.error(`[MostlyGoodMetrics] ${message}`);
   }
 
   /**

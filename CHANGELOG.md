@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- `experimentMode: 'local'` without inline `localExperiments` now **fails loudly** instead of silently returning fallbacks. Local mode without inline configs relied on `GET /v1/experiments/configs`, an endpoint that does not exist in the backend, so the fetch 404'd and every `getVariant()` returned its fallback with no signal. The SDK now logs a prominent `console.error` and surfaces the failure via a new `experimentInitError` getter, and `ready()` **rejects** with that error. Server mode is unchanged and `ready()` still never rejects there. Local mode remains unsupported without inline configs pending a backend `/v1/experiments/configs` design decision.
+
 ## [0.8.0] - 2026-07-14
 
 ### Added
