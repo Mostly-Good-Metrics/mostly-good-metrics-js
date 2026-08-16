@@ -435,17 +435,14 @@ describe('MostlyGoodMetrics', () => {
       const events = await storage.fetchEvents(10);
       const identifyEvent = events.find((e) => e.name === '$identify');
       expect(identifyEvent).toBeDefined();
-      // user_id stays the newly-identified id...
       expect(identifyEvent?.user_id).toBe('user_123');
-      // ...while $anonymous_id carries the stored anonymous id so the backend
-      // can link anonymous -> identified events.
+      // $anonymous_id carries the stored anon id so the backend can link events.
       expect(identifyEvent?.properties?.['$anonymous_id']).toBe(anonymousIdBeforeIdentify);
     });
 
     it('should omit $anonymous_id when the anonymous id equals the identified user id (MGM-195)', async () => {
       const sharedId = 'shared-id-abc';
-      // Reset so we can reconfigure with an anonymous id override that matches
-      // the identified id, leaving no distinct anonymous id to alias.
+      // Reconfigure with an anon id that matches the identified id (nothing to alias).
       MostlyGoodMetrics.reset();
       MostlyGoodMetrics.configure({
         apiKey: 'test-key',
