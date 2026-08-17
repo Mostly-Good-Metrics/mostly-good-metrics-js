@@ -2571,6 +2571,35 @@ describe('MostlyGoodMetrics', () => {
         expect(consoleErrorSpy).not.toHaveBeenCalled();
         expect(MostlyGoodMetrics.getVariant('button-color')).toBe('treatment');
       });
+
+      // Regression: the configs-fetch abort (EXPERIMENTS_FETCH_TIMEOUT_MS = 60s)
+      // is longer than ready()'s default window. A hung /v1/experiments/configs
+      // (plausible behind a proxy for a nonexistent route) must NOT let ready()
+      // resolve cleanly - otherwise the developer gets silent fallbacks for up
+      // to 60s, the exact failure this is meant to eliminate.
+      it('surfaces an error when the configs fetch hangs past ready()\'s timeout', async () => {
+        jest.useFakeTimers();
+        try {
+          // Endpoint never settles
+          global.fetch = jest
+            .fn()
+            .mockImplementation(() => new Promise(() => {})) as unknown as typeof global.fetch;
+
+          const instance = configureLocal({ localExperiments: undefined });
+
+          // ready() rejects on its own timeout, well before the 60s fetch abort
+          const assertion = expect(MostlyGoodMetrics.ready(1000)).rejects.toThrow(/unsupported/i);
+          await jest.advanceTimersByTimeAsync(1000);
+          await assertion;
+
+          expect(instance.experimentInitError).toBeInstanceOf(Error);
+          expect(instance.experimentInitError?.message).toContain('/v1/experiments/configs');
+          expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
+        } finally {
+          jest.useRealTimers();
+        }
+      });
+
     });
   });
 

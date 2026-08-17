@@ -840,7 +840,23 @@ export class MostlyGoodMetrics {
         reject(this.experimentInitErrorValue);
         return;
       }
-      const timer = setTimeout(resolve, timeoutMs);
+      const timer = setTimeout(() => {
+        // Local mode without a loaded config must fail loudly even if the
+        // configs fetch hangs past this timeout. The fetch abort
+        // (EXPERIMENTS_FETCH_TIMEOUT_MS) can exceed ready()'s window, so a hung
+        // /v1/experiments/configs would otherwise let ready() resolve cleanly
+        // for up to that abort - the exact silent-fallback failure this guards
+        // against. Surface the error instead of resolving.
+        if (this.config.experimentMode === 'local' && !this.experimentsLoaded) {
+          this.reportLocalModeUnsupported(
+            `Local experiment configs did not load within ${timeoutMs}ms ` +
+              '(the GET /v1/experiments/configs request is still pending).'
+          );
+          reject(this.experimentInitErrorValue ?? new Error('Local mode unsupported'));
+          return;
+        }
+        resolve();
+      }, timeoutMs);
       void this.experimentsReadyPromise.then(() => {
         clearTimeout(timer);
         if (this.experimentInitErrorValue) {
@@ -1256,6 +1272,11 @@ export class MostlyGoodMetrics {
     // from inline or cached configs; optIn() triggers a fetch.
     if (this.optedOut) {
       logger.debug('Tracking is opted out, skipping local experiment configs fetch');
+      // Intentionally silent (no reportLocalModeUnsupported): opt-out is a
+      // supported deferred-consent flow - configure opted-out, then optIn()
+      // triggers the fetch. ready() must resolve here, not fail loudly, or
+      // every consent-gated page load would error. The loud failure applies
+      // once opted in (see the fetch below and the ready() timeout guard).
       this.markExperimentsReady();
       return;
     }
