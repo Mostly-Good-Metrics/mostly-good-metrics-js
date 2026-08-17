@@ -420,6 +420,48 @@ describe('MostlyGoodMetrics', () => {
       const identifyEvent = events.find((e) => e.name === '$identify');
       expect(identifyEvent).toBeUndefined();
     });
+
+    it('should include $anonymous_id equal to the pre-identify anonymous id (MGM-195)', async () => {
+      MostlyGoodMetrics.resetIdentity(); // Clear any previous identify state
+
+      // Capture the anonymous id used for events before identify() is called.
+      const anonymousIdBeforeIdentify = MostlyGoodMetrics.shared?.anonymousId;
+      expect(anonymousIdBeforeIdentify).toBeDefined();
+
+      MostlyGoodMetrics.identify('user_123', { email: 'link@example.com' });
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const events = await storage.fetchEvents(10);
+      const identifyEvent = events.find((e) => e.name === '$identify');
+      expect(identifyEvent).toBeDefined();
+      expect(identifyEvent?.user_id).toBe('user_123');
+      // $anonymous_id carries the stored anon id so the backend can link events.
+      expect(identifyEvent?.properties?.['$anonymous_id']).toBe(anonymousIdBeforeIdentify);
+    });
+
+    it('should omit $anonymous_id when the anonymous id equals the identified user id (MGM-195)', async () => {
+      const sharedId = 'shared-id-abc';
+      // Reconfigure with an anon id that matches the identified id (nothing to alias).
+      MostlyGoodMetrics.reset();
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+        anonymousId: sharedId,
+      });
+      MostlyGoodMetrics.resetIdentity(); // Clear any previous identify state
+
+      MostlyGoodMetrics.identify(sharedId, { email: 'same@example.com' });
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const events = await storage.fetchEvents(10);
+      const identifyEvent = events.find((e) => e.name === '$identify');
+      expect(identifyEvent).toBeDefined();
+      expect(identifyEvent?.properties?.['$anonymous_id']).toBeUndefined();
+    });
   });
 
   describe('resetIdentity', () => {

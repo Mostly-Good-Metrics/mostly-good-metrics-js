@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- The `$identify` event now includes an `$anonymous_id` property set to the user's stored anonymous ID (the ID used for events before `identify()` was called), so the backend can link anonymous events to the newly-identified `user_id`. The event's `user_id` remains the identified ID, and `$anonymous_id` is omitted when there is no distinct anonymous ID (null or equal to the identified ID). (MGM-195)
+
 ## [0.8.0] - 2026-07-14
 
 ### Added
