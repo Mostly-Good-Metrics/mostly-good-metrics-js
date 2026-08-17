@@ -2577,7 +2577,7 @@ describe('MostlyGoodMetrics', () => {
       // (plausible behind a proxy for a nonexistent route) must NOT let ready()
       // resolve cleanly - otherwise the developer gets silent fallbacks for up
       // to 60s, the exact failure this is meant to eliminate.
-      it('surfaces an error when the configs fetch hangs past ready()\'s timeout', async () => {
+      it("surfaces an error when the configs fetch hangs past ready()'s timeout", async () => {
         jest.useFakeTimers();
         try {
           // Endpoint never settles
@@ -2599,7 +2599,6 @@ describe('MostlyGoodMetrics', () => {
           jest.useRealTimers();
         }
       });
-
     });
   });
 
