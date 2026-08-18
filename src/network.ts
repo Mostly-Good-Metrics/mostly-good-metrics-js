@@ -12,7 +12,9 @@ import { getOSVersion } from './utils';
 const EVENTS_ENDPOINT = '/v1/events';
 const REQUEST_TIMEOUT_MS = 60000; // 60 seconds
 // Keep in sync with the "version" field in package.json.
-// The network.test.ts "X-MGM-SDK-Version matches package.json" test fails if this drifts.
+// The network.test.ts "should default X-MGM-SDK-Version to the published
+// package.json version" test fails if this drifts. The bump-version workflow's
+// "Update SDK version constant in code" step rewrites this line on release.
 const SDK_VERSION = '0.10.0';
 
 /**
