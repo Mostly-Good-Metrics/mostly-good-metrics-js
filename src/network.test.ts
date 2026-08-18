@@ -1,6 +1,7 @@
 import { TextEncoder } from 'util';
 import { FetchNetworkClient } from './network';
 import { MGMEventsPayload, ResolvedConfiguration } from './types';
+import { version as PACKAGE_VERSION } from '../package.json';
 
 // Polyfill TextEncoder for Jest environment
 global.TextEncoder = TextEncoder;
@@ -70,6 +71,15 @@ describe('FetchNetworkClient', () => {
 
       expect(capturedHeaders['X-MGM-SDK-Version']).toBeDefined();
       expect(capturedHeaders['X-MGM-SDK-Version']).toMatch(/^\d+\.\d+\.\d+$/);
+    });
+
+    it('should default X-MGM-SDK-Version to the published package.json version', async () => {
+      // Guards against the SDK_VERSION literal in network.ts drifting from the
+      // actual released version in package.json.
+      const config = createMockConfig();
+      await networkClient.sendEvents(createMockPayload(), config);
+
+      expect(capturedHeaders['X-MGM-SDK-Version']).toBe(PACKAGE_VERSION);
     });
 
     it('should use custom sdkVersion when provided', async () => {

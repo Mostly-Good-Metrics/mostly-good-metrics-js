@@ -11,7 +11,9 @@ import { getOSVersion } from './utils';
 
 const EVENTS_ENDPOINT = '/v1/events';
 const REQUEST_TIMEOUT_MS = 60000; // 60 seconds
-const SDK_VERSION = '0.4.0';
+// Keep in sync with the "version" field in package.json.
+// The network.test.ts "X-MGM-SDK-Version matches package.json" test fails if this drifts.
+const SDK_VERSION = '0.10.0';
 
 /**
  * Compress data using gzip if available (browser CompressionStream API).
