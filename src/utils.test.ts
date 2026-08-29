@@ -219,6 +219,7 @@ describe('resolveConfiguration', () => {
     expect(config.maxStoredEvents).toBe(DefaultConfiguration.maxStoredEvents);
     expect(config.enableDebugLogging).toBe(DefaultConfiguration.enableDebugLogging);
     expect(config.trackAppLifecycleEvents).toBe(DefaultConfiguration.trackAppLifecycleEvents);
+    expect(config.existingInstallation).toBe(false);
   });
 
   it('should use provided values', () => {
@@ -231,6 +232,7 @@ describe('resolveConfiguration', () => {
       maxStoredEvents: 5000,
       enableDebugLogging: true,
       trackAppLifecycleEvents: false,
+      existingInstallation: true,
     });
 
     expect(config.baseURL).toBe('https://custom.api.com');
@@ -240,6 +242,7 @@ describe('resolveConfiguration', () => {
     expect(config.maxStoredEvents).toBe(5000);
     expect(config.enableDebugLogging).toBe(true);
     expect(config.trackAppLifecycleEvents).toBe(false);
+    expect(config.existingInstallation).toBe(true);
   });
 
   it('should enforce maxBatchSize constraints', () => {

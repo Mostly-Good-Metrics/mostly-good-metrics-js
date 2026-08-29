@@ -204,6 +204,7 @@ export function resolveConfiguration(config: MGMConfiguration): ResolvedConfigur
     enableDebugLogging: config.enableDebugLogging ?? DefaultConfiguration.enableDebugLogging,
     trackAppLifecycleEvents:
       config.trackAppLifecycleEvents ?? DefaultConfiguration.trackAppLifecycleEvents,
+    existingInstallation: config.existingInstallation ?? DefaultConfiguration.existingInstallation,
     bundleId: config.bundleId ?? detectBundleId(),
     appVersion: config.appVersion ?? '',
     osVersion: config.osVersion ?? '',
@@ -219,6 +220,7 @@ export function resolveConfiguration(config: MGMConfiguration): ResolvedConfigur
       config.collectDeviceProperties ?? DefaultConfiguration.collectDeviceProperties,
     experimentMode: config.experimentMode ?? DefaultConfiguration.experimentMode,
     localExperiments: config.localExperiments,
+    contextProvider: config.contextProvider,
     storage: config.storage,
     networkClient: config.networkClient,
     experimentStorage: config.experimentStorage,

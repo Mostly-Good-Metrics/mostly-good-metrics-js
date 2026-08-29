@@ -397,13 +397,23 @@ export class MostlyGoodMetrics {
       return;
     }
 
+    if (
+      !Object.values(SystemEvents).includes(
+        name as (typeof SystemEvents)[keyof typeof SystemEvents]
+      )
+    ) {
+      this.warnOnReservedPropertyKeys(properties);
+    }
+
     const sanitizedProperties = sanitizeProperties(properties);
+    const contextProperties = this.getDynamicContext();
     const superProperties = persistence.getSuperProperties();
 
-    // Merge properties: super properties < event properties < system properties
-    // Event properties override super properties, system properties are always added
+    // Merge properties: super properties < dynamic context < event properties <
+    // system properties. System properties are always SDK-owned.
     const mergedProperties: EventProperties = {
       ...superProperties,
+      ...contextProperties,
       ...sanitizedProperties,
       ...(this.config.collectDeviceProperties
         ? {
@@ -440,6 +450,37 @@ export class MostlyGoodMetrics {
 
     // Check if we should flush due to batch size
     void this.checkBatchSize();
+  }
+
+  private getDynamicContext(): EventProperties {
+    if (!this.config.contextProvider) {
+      return {};
+    }
+
+    try {
+      const context = this.config.contextProvider();
+      this.warnOnReservedPropertyKeys(context);
+      return sanitizeProperties(context) ?? {};
+    } catch (error) {
+      if (this.config.enableDebugLogging) {
+        logger.warn('contextProvider threw; continuing without dynamic context', error);
+      }
+      return {};
+    }
+  }
+
+  private warnOnReservedPropertyKeys(properties?: EventProperties): void {
+    if (!this.config.enableDebugLogging || !properties) {
+      return;
+    }
+
+    for (const key of Object.keys(properties)) {
+      if (key.startsWith('$')) {
+        logger.warn(
+          `DEBUG validation: property key '${key}' is reserved for MGM system properties and may be overwritten.`
+        );
+      }
+    }
   }
 
   /**
@@ -985,10 +1026,15 @@ export class MostlyGoodMetrics {
     }
 
     if (persistence.isFirstLaunch()) {
-      // First launch ever - track install
-      this.track(SystemEvents.APP_INSTALLED, {
-        [SystemProperties.VERSION]: currentVersion,
-      });
+      // First MGM launch. Existing installations establish the lifecycle
+      // baseline without backfilling a false install event.
+      if (!this.config.existingInstallation) {
+        this.track(SystemEvents.APP_INSTALLED, {
+          [SystemProperties.VERSION]: currentVersion,
+        });
+      } else {
+        logger.debug(`Seeded lifecycle state for existing installation at ${currentVersion}`);
+      }
       persistence.setAppVersion(currentVersion);
     } else if (previousVersion && previousVersion !== currentVersion) {
       // Version changed - track update
