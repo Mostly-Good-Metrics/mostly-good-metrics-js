@@ -15,7 +15,7 @@ const REQUEST_TIMEOUT_MS = 60000; // 60 seconds
 // The network.test.ts "should default X-MGM-SDK-Version to the published
 // package.json version" test fails if this drifts. The bump-version workflow's
 // "Update SDK version constant in code" step rewrites this line on release.
-const SDK_VERSION = '0.10.0';
+const SDK_VERSION = '0.11.0';
 
 /**
  * Compress data using gzip if available (browser CompressionStream API).
