@@ -927,6 +927,58 @@ describe('MostlyGoodMetrics', () => {
     });
   });
 
+  describe('dynamic context and lifecycle migration', () => {
+    beforeEach(() => {
+      localStorage.clear();
+    });
+
+    afterEach(() => {
+      localStorage.clear();
+    });
+
+    it('evaluates context per event with documented collision precedence', async () => {
+      let plan = 'context';
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackAppLifecycleEvents: false,
+        contextProvider: () => ({ plan, organization_id: 'org_123', $sdk: 'custom' }),
+      });
+      MostlyGoodMetrics.setSuperProperty('plan', 'super');
+
+      MostlyGoodMetrics.track('first_event', { plan: 'event' });
+      plan = 'updated_context';
+      MostlyGoodMetrics.track('second_event');
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const events = await storage.fetchEvents(10);
+      const first = events.find((event) => event.name === 'first_event');
+      const second = events.find((event) => event.name === 'second_event');
+
+      expect(first?.properties?.plan).toBe('event');
+      expect(second?.properties?.plan).toBe('updated_context');
+      expect(second?.properties?.organization_id).toBe('org_123');
+      expect(second?.properties?.$sdk).toBe('javascript');
+    });
+
+    it('seeds an existing installation without emitting app_installed', async () => {
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        appVersion: '2.0.0',
+        trackAppLifecycleEvents: true,
+        existingInstallation: true,
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const events = await storage.fetchEvents(10);
+      expect(events.some((event) => event.name === '$app_installed')).toBe(false);
+      expect(localStorage.getItem('mostlygoodmetrics_app_version')).toBe('2.0.0');
+    });
+  });
+
   describe('getVariant', () => {
     let originalFetch: typeof global.fetch;
 

@@ -55,6 +55,22 @@ export interface MGMConfiguration {
   trackAppLifecycleEvents?: boolean;
 
   /**
+   * Whether this is an existing installation migrating to MGM.
+   *
+   * When true, the first MGM launch establishes the current version as its
+   * lifecycle baseline without emitting `$app_installed`. Later version changes
+   * continue to emit `$app_updated`.
+   * @default false
+   */
+  existingInstallation?: boolean;
+
+  /**
+   * Dynamic properties evaluated each time an event is captured. Values are not
+   * persisted. Merge precedence is: super properties < context < event < system.
+   */
+  contextProvider?: () => EventProperties;
+
+  /**
    * Custom bundle identifier to use instead of auto-detection.
    * Useful for multi-tenant applications.
    */
@@ -215,6 +231,7 @@ export interface ResolvedConfiguration extends Required<
     | 'cookieDomain'
     | 'disableCookies'
     | 'localExperiments'
+    | 'contextProvider'
   >
 > {
   storage?: IEventStorage;
@@ -222,6 +239,7 @@ export interface ResolvedConfiguration extends Required<
   experimentStorage?: IExperimentStorage;
   onError?: (error: MGMError) => void;
   localExperiments?: MGMExperimentConfig[];
+  contextProvider?: () => EventProperties;
 }
 
 /**
@@ -650,6 +668,7 @@ export const DefaultConfiguration = {
   maxStoredEvents: 10000,
   enableDebugLogging: false,
   trackAppLifecycleEvents: false,
+  existingInstallation: false,
   persistence: 'localStorage+cookie' as PersistenceMode,
   optedOutByDefault: false,
   respectDoNotTrack: false,

@@ -10,6 +10,7 @@ A lightweight JavaScript/TypeScript SDK for tracking analytics events with [Most
 - [User Identification](#user-identification)
 - [Privacy](#privacy)
 - [Configuration Options](#configuration-options)
+- [Migrating an Existing Site](#migrating-an-existing-site)
 - [Automatic Events](#automatic-events)
 - [Automatic Properties](#automatic-properties)
 - [Automatic Context](#automatic-context)
@@ -264,6 +265,8 @@ MostlyGoodMetrics.configure({
 | `maxStoredEvents` | `10000` | Max cached events |
 | `enableDebugLogging` | `false` | Enable console output |
 | `trackAppLifecycleEvents` | `false` | Auto-track lifecycle events ($app_opened, etc.) |
+| `existingInstallation` | `false` | Establish lifecycle state without a migration-time `$app_installed` |
+| `contextProvider` | - | Dynamic properties evaluated when each event is captured |
 | `bundleId` | auto-detected | Custom bundle identifier |
 | `cookieDomain` | - | Cookie domain for cross-subdomain tracking (e.g., `.example.com`) |
 | `disableCookies` | `false` | Disable cookies entirely (alias for `persistence: 'localStorage'`) |
@@ -273,10 +276,30 @@ MostlyGoodMetrics.configure({
 | `collectDeviceProperties` | `true` | Collect `$device_type`, `$device_model`, `locale`, `timezone` |
 | `anonymousId` | auto-generated | Override anonymous ID (for wrapper SDKs) |
 | `storage` | auto-detected | Custom storage adapter (see [Custom Storage](#custom-storage)) |
+
 | `networkClient` | fetch-based | Custom network client |
 | `experimentStorage` | auto-detected | Custom key-value storage for the experiments cache (see [A/B Testing](#ab-testing-experiments)) |
 | `experimentMode` | `'server'` | `'server'` (server-assigned variants) or `'local'` (on-device bucketing, see [Local Experiment Enrollment](#local-experiment-enrollment)) |
 | `localExperiments` | - | Inline experiment configs for local mode (zero network) |
+
+## Migrating an Existing Site
+
+When adding MGM to an already-deployed site, set `existingInstallation` from a
+legacy marker that proves this browser/device existed before MGM. MGM records
+the current `appVersion` as its lifecycle baseline without treating those users
+as fresh installs:
+
+```typescript
+MostlyGoodMetrics.configure({
+  apiKey: 'mgm_proj_your_api_key',
+  appVersion: '2.0.0',
+  trackAppLifecycleEvents: true,
+  existingInstallation: legacyAnalytics.hasInstallationMarker(),
+});
+```
+
+Future version changes still emit `$app_updated`. Do not set this to `true` for
+every visitor: doing so would suppress `$app_installed` for genuine new users.
 
 ## Automatic Events
 
@@ -383,6 +406,26 @@ MostlyGoodMetrics.track('checkout', {
   },
 });
 ```
+
+### Dynamic global properties
+
+Use `contextProvider` for values that can change while a page is open. The
+provider runs for every event and its result is never persisted:
+
+```typescript
+MostlyGoodMetrics.configure({
+  apiKey: 'mgm_proj_your_api_key',
+  contextProvider: () => ({
+    organization_id: currentOrganization.id,
+    subscription_tier: currentUser.plan,
+  }),
+});
+```
+
+Collision precedence is: super properties < dynamic context < event properties
+< MGM system properties. `$`-prefixed keys are MGM-reserved; with
+`enableDebugLogging: true`, MGM warns when custom event/context properties use
+those keys.
 
 **Limits:**
 - String values: truncated to 1000 characters
