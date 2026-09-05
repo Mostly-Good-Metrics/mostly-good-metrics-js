@@ -55,6 +55,20 @@ export interface MGMConfiguration {
   trackAppLifecycleEvents?: boolean;
 
   /**
+   * Automatically capture `page_view` events in browsers, including SPA
+   * history navigation, and a `$page_engagement` event when the page becomes
+   * hidden. This is the recommended setup for MGM Web Analytics.
+   * @default false
+   */
+  trackPageViews?: boolean;
+
+  /**
+   * Minutes of inactivity before a browser visit starts a new session.
+   * @default 30
+   */
+  sessionTimeoutMinutes?: number;
+
+  /**
    * Whether this is an existing installation migrating to MGM.
    *
    * When true, the first MGM launch establishes the current version as its
@@ -526,6 +540,7 @@ export const SystemEvents = {
   APP_BACKGROUNDED: '$app_backgrounded',
   IDENTIFY: '$identify',
   EXPERIMENT_EXPOSURE: '$experiment_exposure',
+  PAGE_ENGAGEMENT: '$page_engagement',
 } as const;
 
 /**
@@ -653,6 +668,14 @@ export const SystemProperties = {
   VERSION: '$version',
   PREVIOUS_VERSION: '$previous_version',
   SDK: '$sdk',
+  BROWSER: '$browser',
+  BROWSER_VERSION: '$browser_version',
+  OS: '$os',
+  SCREEN_WIDTH: '$screen_width',
+  SCREEN_HEIGHT: '$screen_height',
+  VIEWPORT_WIDTH: '$viewport_width',
+  VIEWPORT_HEIGHT: '$viewport_height',
+  USER_AGENT: '$user_agent',
   EXPERIMENT_NAME: '$experiment_name',
   VARIANT: '$variant',
 } as const;
@@ -668,6 +691,8 @@ export const DefaultConfiguration = {
   maxStoredEvents: 10000,
   enableDebugLogging: false,
   trackAppLifecycleEvents: false,
+  trackPageViews: false,
+  sessionTimeoutMinutes: 30,
   existingInstallation: false,
   persistence: 'localStorage+cookie' as PersistenceMode,
   optedOutByDefault: false,
@@ -688,6 +713,7 @@ export const Constraints = {
   MAX_STRING_PROPERTY_LENGTH: 1000,
   MAX_PROPERTY_DEPTH: 3,
   MAX_PROPERTY_SIZE_BYTES: 10 * 1024, // 10KB
+  MIN_SESSION_TIMEOUT_MINUTES: 1,
   COMPRESSION_THRESHOLD_BYTES: 1024, // 1KB
 } as const;
 

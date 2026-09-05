@@ -94,6 +94,8 @@ export {
   detectDeviceType,
   getOSVersion,
   getDeviceModel,
+  getBrowserInfo,
+  getOSName,
   isDoNotTrackEnabled,
 } from './utils';
 

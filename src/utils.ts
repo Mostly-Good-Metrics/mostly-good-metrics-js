@@ -204,6 +204,11 @@ export function resolveConfiguration(config: MGMConfiguration): ResolvedConfigur
     enableDebugLogging: config.enableDebugLogging ?? DefaultConfiguration.enableDebugLogging,
     trackAppLifecycleEvents:
       config.trackAppLifecycleEvents ?? DefaultConfiguration.trackAppLifecycleEvents,
+    trackPageViews: config.trackPageViews ?? DefaultConfiguration.trackPageViews,
+    sessionTimeoutMinutes: Math.max(
+      config.sessionTimeoutMinutes ?? DefaultConfiguration.sessionTimeoutMinutes,
+      Constraints.MIN_SESSION_TIMEOUT_MINUTES
+    ),
     existingInstallation: config.existingInstallation ?? DefaultConfiguration.existingInstallation,
     bundleId: config.bundleId ?? detectBundleId(),
     appVersion: config.appVersion ?? '',
@@ -345,6 +350,59 @@ export function getDeviceModel(): string {
   }
 
   return '';
+}
+
+/** Browser name and full version parsed from the user agent. */
+export function getBrowserInfo(): { name: string; version: string } {
+  if (typeof navigator === 'undefined' || !navigator.userAgent) {
+    return { name: '', version: '' };
+  }
+
+  const patterns: [RegExp, string][] = [
+    [/Edg\/([\d.]+)/i, 'Edge'],
+    [/OPR\/([\d.]+)/i, 'Opera'],
+    [/CriOS\/([\d.]+)/i, 'Chrome'],
+    [/Chrome\/([\d.]+)/i, 'Chrome'],
+    [/FxiOS\/([\d.]+)/i, 'Firefox'],
+    [/Firefox\/([\d.]+)/i, 'Firefox'],
+    [/Version\/([\d.]+).*Safari\//i, 'Safari'],
+  ];
+
+  for (const [pattern, name] of patterns) {
+    const match = navigator.userAgent.match(pattern);
+    if (match) {
+      return { name, version: match[1] };
+    }
+  }
+
+  return { name: '', version: '' };
+}
+
+/** Operating-system name without the version suffix. */
+export function getOSName(): string {
+  const value = getOSVersion();
+  if (!value) {
+    return '';
+  }
+  if (value.startsWith('macOS')) {
+    return 'macOS';
+  }
+  if (value.startsWith('iPadOS')) {
+    return 'iPadOS';
+  }
+  if (value.startsWith('iOS')) {
+    return 'iOS';
+  }
+  if (value.startsWith('Android')) {
+    return 'Android';
+  }
+  if (value.startsWith('Windows')) {
+    return 'Windows';
+  }
+  if (value.startsWith('Linux')) {
+    return 'Linux';
+  }
+  return value;
 }
 
 /**

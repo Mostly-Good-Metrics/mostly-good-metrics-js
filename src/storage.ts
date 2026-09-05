@@ -17,6 +17,12 @@ const SUPER_PROPERTIES_KEY = 'mostlygoodmetrics_super_properties';
 const IDENTIFY_HASH_KEY = 'mostlygoodmetrics_identify_hash';
 const IDENTIFY_TIMESTAMP_KEY = 'mostlygoodmetrics_identify_timestamp';
 const OPT_OUT_KEY = 'mostlygoodmetrics_opt_out';
+const SESSION_KEY = 'mostlygoodmetrics_session';
+
+interface PersistedSession {
+  id: string;
+  lastActivityAt: number;
+}
 
 /**
  * Check if we're running in a browser environment with localStorage available.
@@ -76,11 +82,15 @@ function getCookie(name: string): string | null {
  * Set a cookie with optional domain for cross-subdomain support.
  * Uses a 1-year expiry by default.
  */
-function setCookie(name: string, value: string, domain?: string): void {
+function setCookie(
+  name: string,
+  value: string,
+  domain?: string,
+  maxAge = 365 * 24 * 60 * 60
+): void {
   if (!isCookieAvailable()) {
     return;
   }
-  const maxAge = 365 * 24 * 60 * 60; // 1 year in seconds
   let cookieString = `${name}=${encodeURIComponent(value)}; path=/; max-age=${maxAge}; SameSite=Lax`;
   if (domain) {
     cookieString += `; domain=${domain}`;
@@ -308,6 +318,7 @@ class PersistenceManager {
   private inMemoryOptOut: boolean | null = null;
   private inMemoryIdentifyHash: string | null = null;
   private inMemoryIdentifyLastSentAt: number | null = null;
+  private inMemorySession: PersistedSession | null = null;
   private cookieDomain: string | undefined = undefined;
   private mode: PersistenceMode = 'localStorage+cookie';
 
@@ -670,6 +681,93 @@ class PersistenceManager {
     }
 
     this.inMemoryOptOut = optedOut;
+  }
+
+  /** Resolve and touch the browser session using an inactivity timeout. */
+  touchSession(timeoutMs: number, generateUUID: () => string): string {
+    const now = Date.now();
+    let session = this.getSession();
+
+    if (!session || now - session.lastActivityAt >= timeoutMs) {
+      session = { id: generateUUID(), lastActivityAt: now };
+    } else {
+      session.lastActivityAt = now;
+    }
+
+    this.setSession(session, timeoutMs);
+    return session.id;
+  }
+
+  /** Force a fresh browser session. */
+  resetSession(timeoutMs: number, generateUUID: () => string): string {
+    const session = { id: generateUUID(), lastActivityAt: Date.now() };
+    this.setSession(session, timeoutMs);
+    return session.id;
+  }
+
+  clearSession(): void {
+    if (this.shouldUseCookies()) {
+      setCookie(SESSION_KEY, '', this.cookieDomain, 0);
+    }
+    if (this.shouldUseLocalStorage()) {
+      try {
+        localStorage.removeItem(SESSION_KEY);
+      } catch {
+        /* best effort */
+      }
+    }
+    this.inMemorySession = null;
+  }
+
+  private getSession(): PersistedSession | null {
+    if (this.shouldUseCookies()) {
+      const raw = getCookie(SESSION_KEY);
+      if (raw) {
+        const session = this.parseSession(raw);
+        if (session) {
+          return session;
+        }
+      }
+    }
+
+    if (this.shouldUseLocalStorage()) {
+      try {
+        const raw = localStorage.getItem(SESSION_KEY);
+        return raw ? this.parseSession(raw) : null;
+      } catch {
+        return null;
+      }
+    }
+
+    return this.inMemorySession;
+  }
+
+  private parseSession(raw: string): PersistedSession | null {
+    try {
+      const value = JSON.parse(raw) as Partial<PersistedSession>;
+      return typeof value.id === 'string' &&
+        value.id !== '' &&
+        Number.isFinite(value.lastActivityAt)
+        ? { id: value.id, lastActivityAt: value.lastActivityAt as number }
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private setSession(session: PersistedSession, timeoutMs: number): void {
+    const raw = JSON.stringify(session);
+    if (this.shouldUseCookies()) {
+      setCookie(SESSION_KEY, raw, this.cookieDomain, Math.ceil(timeoutMs / 1000));
+    }
+    if (this.shouldUseLocalStorage()) {
+      try {
+        localStorage.setItem(SESSION_KEY, raw);
+      } catch {
+        /* best effort */
+      }
+    }
+    this.inMemorySession = session;
   }
 }
 

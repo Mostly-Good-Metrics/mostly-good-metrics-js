@@ -249,6 +249,7 @@ MostlyGoodMetrics.configure({
   maxStoredEvents: 10000,
   enableDebugLogging: process.env.NODE_ENV === 'development',
   trackAppLifecycleEvents: true,
+  trackPageViews: true,
   cookieDomain: '.yourdomain.com',
   disableCookies: false,
 });
@@ -265,6 +266,8 @@ MostlyGoodMetrics.configure({
 | `maxStoredEvents` | `10000` | Max cached events |
 | `enableDebugLogging` | `false` | Enable console output |
 | `trackAppLifecycleEvents` | `false` | Auto-track lifecycle events ($app_opened, etc.) |
+| `trackPageViews` | `false` | Capture page views, SPA navigation, and active page engagement for Web Analytics |
+| `sessionTimeoutMinutes` | `30` | Start a new web session after this many inactive minutes |
 | `existingInstallation` | `false` | Establish lifecycle state without a migration-time `$app_installed` |
 | `contextProvider` | - | Dynamic properties evaluated when each event is captured |
 | `bundleId` | auto-detected | Custom bundle identifier |
@@ -302,6 +305,23 @@ Future version changes still emit `$app_updated`. Do not set this to `true` for
 every visitor: doing so would suppress `$app_installed` for genuine new users.
 
 ## Automatic Events
+
+For website analytics, opt in once during configuration:
+
+```typescript
+MostlyGoodMetrics.configure({
+  apiKey: 'mgm_proj_your_api_key',
+  trackPageViews: true,
+});
+```
+
+This captures an initial `page_view`, subsequent `pushState`, `replaceState`,
+and back/forward navigation, plus `$page_engagement` when the page becomes
+hidden. Page views include `url`, `hostname`, `pathname`, `title`, `referrer`,
+`referring_domain`, and any `utm_source`, `utm_medium`, `utm_campaign`,
+`utm_term`, or `utm_content` values. A session continues across reloads and
+navigation until 30 minutes of inactivity (configurable with
+`sessionTimeoutMinutes`).
 
 When `trackAppLifecycleEvents` is enabled, the SDK automatically tracks:
 
