@@ -11,11 +11,17 @@ import {
 
 class MockNetworkClient implements INetworkClient {
   public sentPayloads: MGMEventsPayload[] = [];
+  public sentOptions: Array<{ keepalive?: boolean } | undefined> = [];
   public sendResult: SendResult = { success: true };
   private rateLimited = false;
 
-  async sendEvents(payload: MGMEventsPayload, _config: ResolvedConfiguration): Promise<SendResult> {
+  async sendEvents(
+    payload: MGMEventsPayload,
+    _config: ResolvedConfiguration,
+    options?: { keepalive?: boolean }
+  ): Promise<SendResult> {
     this.sentPayloads.push(payload);
+    this.sentOptions.push(options);
     return this.sendResult;
   }
 
@@ -84,6 +90,170 @@ describe('MostlyGoodMetrics', () => {
       });
 
       expect(instance1).toBe(instance2);
+    });
+  });
+
+  describe('web analytics', () => {
+    beforeEach(() => {
+      localStorage.clear();
+      window.history.replaceState({}, '', '/');
+      document.title = 'MGM test site';
+    });
+
+    it('keeps a browser session across page reloads until the inactivity timeout', () => {
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        persistence: 'localStorage',
+        platform: 'web',
+      });
+      const firstSession = MostlyGoodMetrics.shared?.sessionId;
+      MostlyGoodMetrics.reset();
+
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        persistence: 'localStorage',
+        platform: 'web',
+      });
+      expect(MostlyGoodMetrics.shared?.sessionId).toBe(firstSession);
+    });
+
+    it('starts a new browser session after the inactivity timeout', () => {
+      localStorage.setItem(
+        'mostlygoodmetrics_session',
+        JSON.stringify({ id: 'expired-session', lastActivityAt: Date.now() - 31 * 60 * 1000 })
+      );
+
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        persistence: 'localStorage',
+        sessionTimeoutMinutes: 30,
+        platform: 'web',
+      });
+
+      expect(MostlyGoodMetrics.shared?.sessionId).not.toBe('expired-session');
+    });
+
+    it('captures initial and SPA page views with useful website dimensions', async () => {
+      window.history.replaceState({}, '', '/landing?utm_source=threads&utm_campaign=launch');
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        persistence: 'localStorage',
+        trackPageViews: true,
+        platform: 'web',
+      });
+      window.history.pushState({}, '', '/pricing');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const events = await storage.fetchEvents(10);
+      const pageViews = events.filter((event) => event.name === 'page_view');
+      expect(pageViews).toHaveLength(2);
+      expect(pageViews[0].properties).toMatchObject({
+        pathname: '/landing',
+        utm_source: 'threads',
+        utm_campaign: 'launch',
+        title: 'MGM test site',
+      });
+      expect(pageViews[1].properties).toMatchObject({
+        pathname: '/pricing',
+        referrer: expect.stringContaining('/landing'),
+      });
+    });
+
+    it('captures replaceState and browser back navigation', async () => {
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        persistence: 'localStorage',
+        trackPageViews: true,
+        platform: 'web',
+      });
+      window.history.replaceState({}, '', '/account');
+      window.dispatchEvent(new PopStateEvent('popstate'));
+
+      const events = await storage.fetchEvents(10);
+      expect(events.filter((event) => event.name === 'page_view')).toHaveLength(3);
+      expect(events.at(-1)?.properties?.pathname).toBe('/account');
+    });
+
+    it('does not capture page views unless explicitly enabled', async () => {
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        persistence: 'localStorage',
+        platform: 'web',
+      });
+      window.history.pushState({}, '', '/quiet');
+
+      expect((await storage.fetchEvents(10)).some((event) => event.name === 'page_view')).toBe(
+        false
+      );
+    });
+
+    it('flushes visible-page engagement when the page is hidden', async () => {
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        persistence: 'localStorage',
+        trackPageViews: true,
+        platform: 'web',
+      });
+      await new Promise((resolve) => setTimeout(resolve, 110));
+
+      window.dispatchEvent(new PageTransitionEvent('pagehide'));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(networkClient.sentPayloads.flatMap((payload) => payload.events)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            name: '$page_engagement',
+            properties: expect.objectContaining({ engagement_time_ms: expect.any(Number) }),
+          }),
+        ])
+      );
+      expect(networkClient.sentOptions).toContainEqual({ keepalive: true });
+    });
+
+    it('restores patched history methods when reset', async () => {
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackPageViews: true,
+        platform: 'web',
+      });
+      MostlyGoodMetrics.reset();
+      const countAfterReset = await storage.eventCount();
+      window.history.pushState({}, '', '/after-reset');
+
+      await expect(storage.eventCount()).resolves.toBe(countAfterReset);
+    });
+
+    it('captures the documented browser properties', async () => {
+      MostlyGoodMetrics.configure({ apiKey: 'test-key', storage, networkClient });
+      MostlyGoodMetrics.track('button_clicked');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const [event] = await storage.fetchEvents(1);
+      expect(event.properties).toEqual(
+        expect.objectContaining({
+          $device_type: expect.any(String),
+          $browser: expect.any(String),
+          $browser_version: expect.any(String),
+          $os: expect.any(String),
+          $user_agent: expect.any(String),
+        })
+      );
     });
   });
 

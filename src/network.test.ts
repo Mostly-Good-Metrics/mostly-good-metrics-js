@@ -144,6 +144,27 @@ describe('FetchNetworkClient', () => {
   });
 
   describe('sendEvents', () => {
+    it('uses fetch keepalive when requested for page-exit delivery', async () => {
+      await networkClient.sendEvents(createMockPayload(), createMockConfig(), { keepalive: true });
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ keepalive: true })
+      );
+    });
+
+    it('avoids browser keepalive limits for oversized queued payloads', async () => {
+      const payload = createMockPayload();
+      payload.events[0].properties = { oversized: 'x'.repeat(61_000) };
+
+      await networkClient.sendEvents(payload, createMockConfig(), { keepalive: true });
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ keepalive: false })
+      );
+    });
+
     it('should return success on 204 response', async () => {
       mockFetch.mockResolvedValueOnce({
         status: 204,

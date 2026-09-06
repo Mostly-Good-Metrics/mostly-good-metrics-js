@@ -28,8 +28,10 @@ import {
   generateAnonymousId,
   generateUUID,
   getDeviceModel,
+  getBrowserInfo,
   getISOTimestamp,
   getLocale,
+  getOSName,
   getOSVersion,
   getTimezone,
   isDoNotTrackEnabled,
@@ -66,6 +68,12 @@ export class MostlyGoodMetrics {
   private sessionIdValue: string;
   private anonymousIdValue: string;
   private lifecycleSetup = false;
+  private webAnalyticsSetup = false;
+  private sessionHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private pageVisibleAt: number | null = null;
+  private currentPageURL: string | null = null;
+  private originalPushState: typeof history.pushState | null = null;
+  private originalReplaceState: typeof history.replaceState | null = null;
   private optedOut: boolean;
 
   // A/B testing state
@@ -83,12 +91,11 @@ export class MostlyGoodMetrics {
    */
   private constructor(config: MGMConfiguration) {
     this.config = resolveConfiguration(config);
-    this.sessionIdValue = generateUUID();
-
     // Configure persistence settings before initializing anonymous ID.
     // `disableCookies` is honored as an alias for persistence: 'localStorage'
     // during configuration resolution.
     persistence.configurePersistence(this.config.persistence, config.cookieDomain);
+    this.sessionIdValue = this.resolveSessionId();
     this.anonymousIdValue = persistence.initializeAnonymousId(
       config.anonymousId,
       generateAnonymousId
@@ -141,6 +148,10 @@ export class MostlyGoodMetrics {
     // Set up lifecycle tracking
     if (this.config.trackAppLifecycleEvents) {
       this.setupLifecycleTracking();
+    }
+
+    if (this.config.trackPageViews) {
+      this.setupWebAnalytics();
     }
 
     // Hydrate the experiments cache and revalidate in the background
@@ -405,12 +416,14 @@ export class MostlyGoodMetrics {
       this.warnOnReservedPropertyKeys(properties);
     }
 
+    this.sessionIdValue = this.resolveSessionId();
     const sanitizedProperties = sanitizeProperties(properties);
     const contextProperties = this.getDynamicContext();
     const superProperties = persistence.getSuperProperties();
 
     // Merge properties: super properties < dynamic context < event properties <
     // system properties. System properties are always SDK-owned.
+    const browser = getBrowserInfo();
     const mergedProperties: EventProperties = {
       ...superProperties,
       ...contextProperties,
@@ -419,6 +432,15 @@ export class MostlyGoodMetrics {
         ? {
             [SystemProperties.DEVICE_TYPE]: detectDeviceType(),
             [SystemProperties.DEVICE_MODEL]: getDeviceModel(),
+            [SystemProperties.BROWSER]: browser.name,
+            [SystemProperties.BROWSER_VERSION]: browser.version,
+            [SystemProperties.OS]: getOSName(),
+            [SystemProperties.SCREEN_WIDTH]: this.browserNumber('screen', 'width'),
+            [SystemProperties.SCREEN_HEIGHT]: this.browserNumber('screen', 'height'),
+            [SystemProperties.VIEWPORT_WIDTH]: this.browserNumber('window', 'innerWidth'),
+            [SystemProperties.VIEWPORT_HEIGHT]: this.browserNumber('window', 'innerHeight'),
+            [SystemProperties.USER_AGENT]:
+              typeof navigator === 'undefined' ? '' : navigator.userAgent,
           }
         : {}),
       [SystemProperties.SDK]: this.config.sdk,
@@ -612,6 +634,8 @@ export class MostlyGoodMetrics {
 
       // Rotate the anonymous ID
       this.resetAnonymousId();
+      persistence.clearSession();
+      this.sessionIdValue = this.resolveSessionId();
 
       // Purge queued (unsent) events
       this.storage.clear().catch((e) => {
@@ -717,7 +741,10 @@ export class MostlyGoodMetrics {
    * Start a new session.
    */
   startNewSession(): void {
-    this.sessionIdValue = generateUUID();
+    this.sessionIdValue =
+      this.config.platform === 'web'
+        ? persistence.resetSession(this.config.sessionTimeoutMinutes * 60 * 1000, generateUUID)
+        : generateUUID();
     logger.debug(`Started new session: ${this.sessionIdValue}`);
   }
 
@@ -725,6 +752,10 @@ export class MostlyGoodMetrics {
    * Flush pending events to the server.
    */
   async flush(): Promise<void> {
+    await this.flushInternal(false);
+  }
+
+  private async flushInternal(keepalive: boolean): Promise<void> {
     if (this.optedOut) {
       logger.debug('Tracking is opted out, skipping flush');
       return;
@@ -739,7 +770,7 @@ export class MostlyGoodMetrics {
     logger.debug('Starting flush');
 
     try {
-      await this.performFlush();
+      await this.performFlush(keepalive);
     } finally {
       this.isFlushingInternal = false;
     }
@@ -873,6 +904,7 @@ export class MostlyGoodMetrics {
   destroy(): void {
     this.stopFlushTimer();
     this.removeLifecycleListeners();
+    this.removeWebAnalytics();
     logger.debug('MostlyGoodMetrics instance destroyed');
   }
 
@@ -888,7 +920,165 @@ export class MostlyGoodMetrics {
     }
   }
 
-  private async performFlush(): Promise<void> {
+  private resolveSessionId(): string {
+    if (this.config.platform !== 'web') {
+      return this.sessionIdValue || generateUUID();
+    }
+    return persistence.touchSession(this.config.sessionTimeoutMinutes * 60 * 1000, generateUUID);
+  }
+
+  private browserNumber(
+    scope: 'screen' | 'window',
+    key: 'width' | 'height' | 'innerWidth' | 'innerHeight'
+  ): number | null {
+    if (scope === 'screen') {
+      if (typeof screen === 'undefined') {
+        return null;
+      }
+      return Number(screen[key as 'width' | 'height']) || null;
+    }
+    if (typeof window === 'undefined') {
+      return null;
+    }
+    return Number(window[key as 'innerWidth' | 'innerHeight']) || null;
+  }
+
+  private setupWebAnalytics(): void {
+    if (
+      this.webAnalyticsSetup ||
+      typeof window === 'undefined' ||
+      typeof document === 'undefined'
+    ) {
+      return;
+    }
+    this.webAnalyticsSetup = true;
+    this.pageVisibleAt = document.hidden ? null : Date.now();
+    this.capturePageView();
+
+    window.addEventListener('popstate', this.handlePageNavigation);
+    document.addEventListener('visibilitychange', this.handleWebVisibilityChange);
+    window.addEventListener('pagehide', this.handleWebPageHide);
+
+    this.originalPushState = history.pushState.bind(history);
+    this.originalReplaceState = history.replaceState.bind(history);
+    history.pushState = ((...args: Parameters<typeof history.pushState>) => {
+      this.originalPushState?.(...args);
+      this.handlePageNavigation();
+    }) as typeof history.pushState;
+    history.replaceState = ((...args: Parameters<typeof history.replaceState>) => {
+      this.originalReplaceState?.(...args);
+      this.handlePageNavigation();
+    }) as typeof history.replaceState;
+
+    const heartbeatMs = Math.min(this.config.sessionTimeoutMinutes * 30_000, 60_000);
+    this.sessionHeartbeatTimer = setInterval(() => {
+      if (!document.hidden) {
+        this.sessionIdValue = this.resolveSessionId();
+      }
+    }, heartbeatMs);
+  }
+
+  private removeWebAnalytics(): void {
+    if (
+      !this.webAnalyticsSetup ||
+      typeof window === 'undefined' ||
+      typeof document === 'undefined'
+    ) {
+      return;
+    }
+    this.capturePageEngagement();
+    window.removeEventListener('popstate', this.handlePageNavigation);
+    document.removeEventListener('visibilitychange', this.handleWebVisibilityChange);
+    window.removeEventListener('pagehide', this.handleWebPageHide);
+    if (this.originalPushState) {
+      history.pushState = this.originalPushState;
+    }
+    if (this.originalReplaceState) {
+      history.replaceState = this.originalReplaceState;
+    }
+    if (this.sessionHeartbeatTimer) {
+      clearInterval(this.sessionHeartbeatTimer);
+    }
+    this.sessionHeartbeatTimer = null;
+    this.webAnalyticsSetup = false;
+  }
+
+  private handlePageNavigation = (): void => {
+    this.capturePageEngagement();
+    this.pageVisibleAt = document.hidden ? null : Date.now();
+    this.capturePageView();
+  };
+
+  private handleWebVisibilityChange = (): void => {
+    if (document.hidden) {
+      this.capturePageEngagement();
+      // Persisted queues make the event durable, and an immediate flush gives
+      // browsers a chance to deliver it before the tab is discarded.
+      void this.flushInternal(true);
+    } else {
+      this.pageVisibleAt = Date.now();
+    }
+  };
+
+  private handleWebPageHide = (): void => {
+    this.capturePageEngagement();
+    // Best effort at teardown; the persisted queue remains available for the
+    // next visit if the browser suspends this asynchronous flush first.
+    void this.flushInternal(true);
+  };
+
+  private capturePageView(): void {
+    const url = new URL(window.location.href);
+    const referrer = this.currentPageURL ?? document.referrer;
+    const properties: EventProperties = {
+      url: url.href,
+      hostname: url.hostname,
+      pathname: url.pathname,
+      query_string: url.search,
+      hash: url.hash,
+      title: document.title,
+      referrer,
+      referring_domain: this.referringDomain(referrer),
+    };
+    for (const key of ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content']) {
+      const value = url.searchParams.get(key);
+      if (value) {
+        properties[key] = value;
+      }
+    }
+    this.track('page_view', properties);
+    this.currentPageURL = url.href;
+  }
+
+  private capturePageEngagement(): void {
+    if (this.pageVisibleAt === null || !this.currentPageURL) {
+      return;
+    }
+    const duration = Math.max(0, Date.now() - this.pageVisibleAt);
+    this.pageVisibleAt = null;
+    if (duration < 100) {
+      return;
+    }
+    const url = new URL(this.currentPageURL);
+    this.track(SystemEvents.PAGE_ENGAGEMENT, {
+      url: url.href,
+      pathname: url.pathname,
+      engagement_time_ms: duration,
+    });
+  }
+
+  private referringDomain(value: string): string {
+    if (!value) {
+      return '';
+    }
+    try {
+      return new URL(value).hostname;
+    } catch {
+      return '';
+    }
+  }
+
+  private async performFlush(keepalive = false): Promise<void> {
     let hasMoreEvents = true;
     while (hasMoreEvents) {
       const eventCount = await this.storage.eventCount();
@@ -909,7 +1099,7 @@ export class MostlyGoodMetrics {
       }
 
       const payload = this.buildPayload(events);
-      const result = await this.networkClient.sendEvents(payload, this.config);
+      const result = await this.networkClient.sendEvents(payload, this.config, { keepalive });
 
       if (result.success) {
         logger.debug(`Successfully sent ${events.length} events`);
@@ -1065,26 +1255,12 @@ export class MostlyGoodMetrics {
   };
 
   private handleBeforeUnload = (): void => {
-    // Best-effort flush using sendBeacon if available
-    this.flushWithBeacon();
+    void this.flushInternal(true);
   };
 
   private handlePageHide = (): void => {
-    // Best-effort flush using sendBeacon if available
-    this.flushWithBeacon();
+    void this.flushInternal(true);
   };
-
-  private flushWithBeacon(): void {
-    // Use sendBeacon for reliable delivery during page unload
-    if (typeof navigator === 'undefined' || !navigator.sendBeacon) {
-      return;
-    }
-
-    // Note: This is a synchronous, best-effort send
-    // We can't use async storage operations here, so we rely on
-    // the regular flush mechanism for most events
-    logger.debug('Page unloading, attempting beacon flush');
-  }
 
   // =====================================================
   // A/B Testing methods

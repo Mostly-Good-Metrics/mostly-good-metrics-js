@@ -11,6 +11,7 @@ import { getOSVersion } from './utils';
 
 const EVENTS_ENDPOINT = '/v1/events';
 const REQUEST_TIMEOUT_MS = 60000; // 60 seconds
+const MAX_KEEPALIVE_BYTES = 60_000;
 // Keep in sync with the "version" field in package.json.
 // The network.test.ts "should default X-MGM-SDK-Version to the published
 // package.json version" test fails if this drifts. The bump-version workflow's
@@ -58,7 +59,11 @@ export class FetchNetworkClient implements INetworkClient {
   /**
    * Send events to the MostlyGoodMetrics API.
    */
-  async sendEvents(payload: MGMEventsPayload, config: ResolvedConfiguration): Promise<SendResult> {
+  async sendEvents(
+    payload: MGMEventsPayload,
+    config: ResolvedConfiguration,
+    options?: { keepalive?: boolean }
+  ): Promise<SendResult> {
     // Check rate limiting
     if (this.isRateLimited()) {
       const retryAfter = this.getRetryAfterTime();
@@ -76,7 +81,14 @@ export class FetchNetworkClient implements INetworkClient {
 
     const url = `${config.baseURL}${EVENTS_ENDPOINT}`;
     const jsonBody = JSON.stringify(payload);
-    const { data, compressed } = await compressIfNeeded(jsonBody);
+    const keepalive =
+      (options?.keepalive ?? false) &&
+      new TextEncoder().encode(jsonBody).byteLength <= MAX_KEEPALIVE_BYTES;
+    // Start exit-time requests immediately. Compression is asynchronous and
+    // browsers may suspend a page before that work finishes.
+    const { data, compressed } = keepalive
+      ? { data: jsonBody, compressed: false }
+      : await compressIfNeeded(jsonBody);
 
     const osVersion = config.osVersion || getOSVersion();
     const sdkVersion = config.sdkVersion || SDK_VERSION;
@@ -108,6 +120,7 @@ export class FetchNetworkClient implements INetworkClient {
         headers,
         body: data,
         signal: controller.signal,
+        keepalive,
       });
 
       clearTimeout(timeoutId);
