@@ -16,7 +16,7 @@ const MAX_KEEPALIVE_BYTES = 60_000;
 // The network.test.ts "should default X-MGM-SDK-Version to the published
 // package.json version" test fails if this drifts. The bump-version workflow's
 // "Update SDK version constant in code" step rewrites this line on release.
-const SDK_VERSION = '0.11.0';
+const SDK_VERSION = '0.12.0';
 
 /**
  * Compress data using gzip if available (browser CompressionStream API).
