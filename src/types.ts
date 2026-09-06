@@ -491,7 +491,11 @@ export interface INetworkClient {
   /**
    * Send a batch of events to the server.
    */
-  sendEvents(payload: MGMEventsPayload, config: ResolvedConfiguration): Promise<SendResult>;
+  sendEvents(
+    payload: MGMEventsPayload,
+    config: ResolvedConfiguration,
+    options?: { keepalive?: boolean }
+  ): Promise<SendResult>;
 
   /**
    * Check if the client is currently rate-limited.

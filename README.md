@@ -315,6 +315,11 @@ MostlyGoodMetrics.configure({
 });
 ```
 
+Page views and visible-page engagement are stored in the SDK's durable browser
+queue before delivery. When a page is hidden or closed, MGM also starts a
+byte-bounded `fetch` keepalive request. Browsers treat teardown delivery as
+best-effort; anything they do not send remains queued for the next visit.
+
 This captures an initial `page_view`, subsequent `pushState`, `replaceState`,
 and back/forward navigation, plus `$page_engagement` when the page becomes
 hidden. Page views include `url`, `hostname`, `pathname`, `title`, `referrer`,

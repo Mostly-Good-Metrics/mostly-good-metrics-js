@@ -11,11 +11,17 @@ import {
 
 class MockNetworkClient implements INetworkClient {
   public sentPayloads: MGMEventsPayload[] = [];
+  public sentOptions: Array<{ keepalive?: boolean } | undefined> = [];
   public sendResult: SendResult = { success: true };
   private rateLimited = false;
 
-  async sendEvents(payload: MGMEventsPayload, _config: ResolvedConfiguration): Promise<SendResult> {
+  async sendEvents(
+    payload: MGMEventsPayload,
+    _config: ResolvedConfiguration,
+    options?: { keepalive?: boolean }
+  ): Promise<SendResult> {
     this.sentPayloads.push(payload);
+    this.sentOptions.push(options);
     return this.sendResult;
   }
 
@@ -161,6 +167,38 @@ describe('MostlyGoodMetrics', () => {
       });
     });
 
+    it('captures replaceState and browser back navigation', async () => {
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        persistence: 'localStorage',
+        trackPageViews: true,
+        platform: 'web',
+      });
+      window.history.replaceState({}, '', '/account');
+      window.dispatchEvent(new PopStateEvent('popstate'));
+
+      const events = await storage.fetchEvents(10);
+      expect(events.filter((event) => event.name === 'page_view')).toHaveLength(3);
+      expect(events.at(-1)?.properties?.pathname).toBe('/account');
+    });
+
+    it('does not capture page views unless explicitly enabled', async () => {
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        persistence: 'localStorage',
+        platform: 'web',
+      });
+      window.history.pushState({}, '', '/quiet');
+
+      expect((await storage.fetchEvents(10)).some((event) => event.name === 'page_view')).toBe(
+        false
+      );
+    });
+
     it('flushes visible-page engagement when the page is hidden', async () => {
       MostlyGoodMetrics.configure({
         apiKey: 'test-key',
@@ -183,6 +221,22 @@ describe('MostlyGoodMetrics', () => {
           }),
         ])
       );
+      expect(networkClient.sentOptions).toContainEqual({ keepalive: true });
+    });
+
+    it('restores patched history methods when reset', async () => {
+      MostlyGoodMetrics.configure({
+        apiKey: 'test-key',
+        storage,
+        networkClient,
+        trackPageViews: true,
+        platform: 'web',
+      });
+      MostlyGoodMetrics.reset();
+      const countAfterReset = await storage.eventCount();
+      window.history.pushState({}, '', '/after-reset');
+
+      await expect(storage.eventCount()).resolves.toBe(countAfterReset);
     });
 
     it('captures the documented browser properties', async () => {

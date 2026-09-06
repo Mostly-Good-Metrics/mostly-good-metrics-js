@@ -752,6 +752,10 @@ export class MostlyGoodMetrics {
    * Flush pending events to the server.
    */
   async flush(): Promise<void> {
+    await this.flushInternal(false);
+  }
+
+  private async flushInternal(keepalive: boolean): Promise<void> {
     if (this.optedOut) {
       logger.debug('Tracking is opted out, skipping flush');
       return;
@@ -766,7 +770,7 @@ export class MostlyGoodMetrics {
     logger.debug('Starting flush');
 
     try {
-      await this.performFlush();
+      await this.performFlush(keepalive);
     } finally {
       this.isFlushingInternal = false;
     }
@@ -1010,7 +1014,7 @@ export class MostlyGoodMetrics {
       this.capturePageEngagement();
       // Persisted queues make the event durable, and an immediate flush gives
       // browsers a chance to deliver it before the tab is discarded.
-      void this.flush();
+      void this.flushInternal(true);
     } else {
       this.pageVisibleAt = Date.now();
     }
@@ -1018,7 +1022,9 @@ export class MostlyGoodMetrics {
 
   private handleWebPageHide = (): void => {
     this.capturePageEngagement();
-    void this.flush();
+    // Best effort at teardown; the persisted queue remains available for the
+    // next visit if the browser suspends this asynchronous flush first.
+    void this.flushInternal(true);
   };
 
   private capturePageView(): void {
@@ -1072,7 +1078,7 @@ export class MostlyGoodMetrics {
     }
   }
 
-  private async performFlush(): Promise<void> {
+  private async performFlush(keepalive = false): Promise<void> {
     let hasMoreEvents = true;
     while (hasMoreEvents) {
       const eventCount = await this.storage.eventCount();
@@ -1093,7 +1099,7 @@ export class MostlyGoodMetrics {
       }
 
       const payload = this.buildPayload(events);
-      const result = await this.networkClient.sendEvents(payload, this.config);
+      const result = await this.networkClient.sendEvents(payload, this.config, { keepalive });
 
       if (result.success) {
         logger.debug(`Successfully sent ${events.length} events`);
@@ -1249,26 +1255,12 @@ export class MostlyGoodMetrics {
   };
 
   private handleBeforeUnload = (): void => {
-    // Best-effort flush using sendBeacon if available
-    this.flushWithBeacon();
+    void this.flushInternal(true);
   };
 
   private handlePageHide = (): void => {
-    // Best-effort flush using sendBeacon if available
-    this.flushWithBeacon();
+    void this.flushInternal(true);
   };
-
-  private flushWithBeacon(): void {
-    // Use sendBeacon for reliable delivery during page unload
-    if (typeof navigator === 'undefined' || !navigator.sendBeacon) {
-      return;
-    }
-
-    // Note: This is a synchronous, best-effort send
-    // We can't use async storage operations here, so we rely on
-    // the regular flush mechanism for most events
-    logger.debug('Page unloading, attempting beacon flush');
-  }
 
   // =====================================================
   // A/B Testing methods
