@@ -91,6 +91,31 @@ describe('MostlyGoodMetrics', () => {
 
       expect(instance1).toBe(instance2);
     });
+
+    it('should configure when window lacks DOM event listener methods', () => {
+      const originalAddEventListener = window.addEventListener;
+      const originalRemoveEventListener = window.removeEventListener;
+      Object.defineProperties(window, {
+        addEventListener: { configurable: true, value: undefined },
+        removeEventListener: { configurable: true, value: undefined },
+      });
+
+      try {
+        expect(() =>
+          MostlyGoodMetrics.configure({
+            apiKey: 'test-key',
+            storage,
+            networkClient,
+            trackAppLifecycleEvents: false,
+          })
+        ).not.toThrow();
+      } finally {
+        Object.defineProperties(window, {
+          addEventListener: { configurable: true, value: originalAddEventListener },
+          removeEventListener: { configurable: true, value: originalRemoveEventListener },
+        });
+      }
+    });
   });
 
   describe('web analytics', () => {
@@ -788,6 +813,17 @@ describe('MostlyGoodMetrics', () => {
 
       const count = await storage.eventCount();
       expect(count).toBe(0);
+    });
+
+    it('should remove successfully sent events by stable client event ID', async () => {
+      MostlyGoodMetrics.track('test_event');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const storedEvent = (await storage.fetchEvents(1))[0];
+      const removeEvents = jest.spyOn(storage, 'removeEvents');
+
+      await MostlyGoodMetrics.flush();
+
+      expect(removeEvents).toHaveBeenCalledWith(1, [storedEvent.client_event_id]);
     });
 
     it('should not send when rate limited', async () => {

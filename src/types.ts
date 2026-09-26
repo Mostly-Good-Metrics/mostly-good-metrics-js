@@ -450,9 +450,11 @@ export interface IEventStorage {
   fetchEvents(limit: number): Promise<MGMEvent[]>;
 
   /**
-   * Remove events from storage after successful send.
+   * Remove events from storage after successful send. The SDK supplies the
+   * stable client event IDs when available so concurrent queue changes do not
+   * remove unsent events. Custom adapters may continue to remove by count.
    */
-  removeEvents(count: number): Promise<void>;
+  removeEvents(count: number, clientEventIds?: string[]): Promise<void>;
 
   /**
    * Get the current count of stored events.

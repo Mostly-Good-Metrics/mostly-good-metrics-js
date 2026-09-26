@@ -1,6 +1,11 @@
 import { logger, setDebugLogging } from './logger';
 import { createDefaultNetworkClient } from './network';
-import { createDefaultExperimentStorage, createDefaultStorage, persistence } from './storage';
+import {
+  createDefaultExperimentStorage,
+  createDefaultStorage,
+  flushPendingStorageWrites,
+  persistence,
+} from './storage';
 import { computeExperimentBucket } from './sha256';
 import {
   CachedExperimentConfigs,
@@ -127,6 +132,7 @@ export class MostlyGoodMetrics {
     this.storage =
       this.config.storage ??
       createDefaultStorage(this.config.maxStoredEvents, this.config.persistence);
+    this.setupStoragePersistenceListeners();
 
     // Initialize network client
     this.networkClient = this.config.networkClient ?? createDefaultNetworkClient();
@@ -905,6 +911,8 @@ export class MostlyGoodMetrics {
     this.stopFlushTimer();
     this.removeLifecycleListeners();
     this.removeWebAnalytics();
+    flushPendingStorageWrites(this.storage);
+    this.removeStoragePersistenceListeners();
     logger.debug('MostlyGoodMetrics instance destroyed');
   }
 
@@ -919,6 +927,34 @@ export class MostlyGoodMetrics {
       void this.flush();
     }
   }
+
+  private setupStoragePersistenceListeners(): void {
+    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+      window.addEventListener('pagehide', this.handleStoragePageHide);
+    }
+    if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+      document.addEventListener('visibilitychange', this.handleStorageVisibilityChange);
+    }
+  }
+
+  private removeStoragePersistenceListeners(): void {
+    if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
+      window.removeEventListener('pagehide', this.handleStoragePageHide);
+    }
+    if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
+      document.removeEventListener('visibilitychange', this.handleStorageVisibilityChange);
+    }
+  }
+
+  private handleStoragePageHide = (): void => {
+    flushPendingStorageWrites(this.storage);
+  };
+
+  private handleStorageVisibilityChange = (): void => {
+    if (document.hidden) {
+      flushPendingStorageWrites(this.storage);
+    }
+  };
 
   private resolveSessionId(): string {
     if (this.config.platform !== 'web') {
@@ -1012,6 +1048,7 @@ export class MostlyGoodMetrics {
   private handleWebVisibilityChange = (): void => {
     if (document.hidden) {
       this.capturePageEngagement();
+      flushPendingStorageWrites(this.storage);
       // Persisted queues make the event durable, and an immediate flush gives
       // browsers a chance to deliver it before the tab is discarded.
       void this.flushInternal(true);
@@ -1022,6 +1059,7 @@ export class MostlyGoodMetrics {
 
   private handleWebPageHide = (): void => {
     this.capturePageEngagement();
+    flushPendingStorageWrites(this.storage);
     // Best effort at teardown; the persisted queue remains available for the
     // next visit if the browser suspends this asynchronous flush first.
     void this.flushInternal(true);
@@ -1103,7 +1141,10 @@ export class MostlyGoodMetrics {
 
       if (result.success) {
         logger.debug(`Successfully sent ${events.length} events`);
-        await this.storage.removeEvents(events.length);
+        await this.storage.removeEvents(
+          events.length,
+          events.map((event) => event.client_event_id)
+        );
       } else {
         logger.warn(`Failed to send events: ${result.error.message}`);
 
@@ -1119,7 +1160,10 @@ export class MostlyGoodMetrics {
         if (!result.shouldRetry) {
           // Drop events on non-retryable errors (4xx)
           logger.warn('Dropping events due to non-retryable error');
-          await this.storage.removeEvents(events.length);
+          await this.storage.removeEvents(
+            events.length,
+            events.map((event) => event.client_event_id)
+          );
         } else {
           // Keep events for retry on retryable errors
           hasMoreEvents = false;
@@ -1247,6 +1291,7 @@ export class MostlyGoodMetrics {
     if (document.hidden) {
       // App backgrounded
       this.track(SystemEvents.APP_BACKGROUNDED);
+      flushPendingStorageWrites(this.storage);
       void this.flush(); // Flush when going to background
     } else {
       // App foregrounded
@@ -1255,10 +1300,12 @@ export class MostlyGoodMetrics {
   };
 
   private handleBeforeUnload = (): void => {
+    flushPendingStorageWrites(this.storage);
     void this.flushInternal(true);
   };
 
   private handlePageHide = (): void => {
+    flushPendingStorageWrites(this.storage);
     void this.flushInternal(true);
   };
 
