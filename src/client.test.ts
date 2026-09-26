@@ -790,6 +790,17 @@ describe('MostlyGoodMetrics', () => {
       expect(count).toBe(0);
     });
 
+    it('should remove successfully sent events by stable client event ID', async () => {
+      MostlyGoodMetrics.track('test_event');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const storedEvent = (await storage.fetchEvents(1))[0];
+      const removeEvents = jest.spyOn(storage, 'removeEvents');
+
+      await MostlyGoodMetrics.flush();
+
+      expect(removeEvents).toHaveBeenCalledWith(1, [storedEvent.client_event_id]);
+    });
+
     it('should not send when rate limited', async () => {
       networkClient.setRateLimited(true);
 

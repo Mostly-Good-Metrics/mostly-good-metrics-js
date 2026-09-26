@@ -27,7 +27,7 @@ A lightweight JavaScript/TypeScript SDK for tracking analytics events with [Most
 
 ## Requirements
 
-- Node.js 16+ (for build tools)
+- Node.js 18+ (for build tools)
 - Modern browser with ES2020 support, or Node.js runtime
 
 ## Installation
@@ -731,7 +731,9 @@ MostlyGoodMetrics.configure({
 class MyCustomStorage implements IEventStorage {
   async store(event: MGMEvent): Promise<void> { /* ... */ }
   async fetchEvents(limit: number): Promise<MGMEvent[]> { /* ... */ }
-  async removeEvents(count: number): Promise<void> { /* ... */ }
+  // clientEventIds contains the stable IDs of the successfully sent events.
+  // Prefer removing by ID so concurrent queue changes cannot remove unsent events.
+  async removeEvents(count: number, clientEventIds?: string[]): Promise<void> { /* ... */ }
   async eventCount(): Promise<number> { /* ... */ }
   async clear(): Promise<void> { /* ... */ }
 }

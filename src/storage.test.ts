@@ -147,6 +147,18 @@ describe('LocalStorageEventStorage', () => {
     expect(localStorage.setItem).toHaveBeenCalled();
   });
 
+  it('should defer and coalesce localStorage writes', async () => {
+    const firstStore = storage.store(createMockEvent('first'));
+    const secondStore = storage.store(createMockEvent('second'));
+
+    expect(localStorage.setItem).not.toHaveBeenCalled();
+
+    await Promise.all([firstStore, secondStore]);
+
+    expect(localStorage.setItem).toHaveBeenCalledTimes(1);
+    expect(JSON.parse((localStorage.setItem as jest.Mock).mock.calls[0][1])).toHaveLength(2);
+  });
+
   it('should return correct event count', async () => {
     expect(await storage.eventCount()).toBe(0);
 
@@ -171,6 +183,48 @@ describe('LocalStorageEventStorage', () => {
     // Should not throw and should return empty array
     const events = await storage.fetchEvents(10);
     expect(events).toHaveLength(0);
+  });
+
+  it('should only remove the requested event when names and timestamps match', async () => {
+    const timestamp = '2026-09-25T12:34:56.789Z';
+    await storage.store({
+      ...createMockEvent('duplicate'),
+      client_event_id: 'first-id',
+      timestamp,
+    });
+    await storage.store({
+      ...createMockEvent('duplicate'),
+      client_event_id: 'second-id',
+      timestamp,
+    });
+
+    await storage.removeEvents(1, ['first-id']);
+
+    expect(await storage.fetchEvents(10)).toEqual([
+      expect.objectContaining({ client_event_id: 'second-id' }),
+    ]);
+  });
+
+  it('should not remove an unsent event when the sent event was trimmed at the cap', async () => {
+    const storage = new LocalStorageEventStorage(100);
+    for (let index = 0; index < 100; index += 1) {
+      await storage.store({
+        ...createMockEvent(`event${index}`),
+        client_event_id: `event-${index}`,
+      });
+    }
+    const sentEvent = (await storage.fetchEvents(1))[0];
+
+    await storage.store({
+      ...createMockEvent('new_event'),
+      client_event_id: 'new-event',
+    });
+    await storage.removeEvents(1, [sentEvent.client_event_id]);
+
+    const remaining = await storage.fetchEvents(100);
+    expect(remaining).toHaveLength(100);
+    expect(remaining[0].client_event_id).toBe('event-1');
+    expect(remaining.at(-1)?.client_event_id).toBe('new-event');
   });
 });
 

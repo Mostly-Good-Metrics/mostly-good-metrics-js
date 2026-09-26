@@ -18,6 +18,7 @@ const IDENTIFY_HASH_KEY = 'mostlygoodmetrics_identify_hash';
 const IDENTIFY_TIMESTAMP_KEY = 'mostlygoodmetrics_identify_timestamp';
 const OPT_OUT_KEY = 'mostlygoodmetrics_opt_out';
 const SESSION_KEY = 'mostlygoodmetrics_session';
+const STORAGE_WRITE_TIMEOUT_MS = 1000;
 
 interface PersistedSession {
   id: string;
@@ -126,8 +127,13 @@ export class InMemoryEventStorage implements IEventStorage {
     return this.events.slice(0, limit);
   }
 
-  async removeEvents(count: number): Promise<void> {
-    this.events.splice(0, count);
+  async removeEvents(count: number, clientEventIds?: string[]): Promise<void> {
+    if (clientEventIds?.length) {
+      const sentIds = new Set(clientEventIds);
+      this.events = this.events.filter((event) => !sentIds.has(event.client_event_id));
+    } else {
+      this.events.splice(0, count);
+    }
   }
 
   async eventCount(): Promise<number> {
@@ -153,6 +159,11 @@ export class InMemoryEventStorage implements IEventStorage {
 export class LocalStorageEventStorage implements IEventStorage {
   private maxEvents: number;
   private events: MGMEvent[] | null = null;
+  private pendingSave: Promise<void> | null = null;
+  private resolvePendingSave: (() => void) | null = null;
+  private rejectPendingSave: ((error: unknown) => void) | null = null;
+  private idleCallbackId: number | null = null;
+  private timeoutId: number | null = null;
 
   constructor(maxEvents: number = Constraints.MIN_STORED_EVENTS) {
     this.maxEvents = Math.max(maxEvents, Constraints.MIN_STORED_EVENTS);
@@ -187,6 +198,64 @@ export class LocalStorageEventStorage implements IEventStorage {
     }
   }
 
+  private scheduleSave(): Promise<void> {
+    if (this.pendingSave) {
+      return this.pendingSave;
+    }
+
+    this.pendingSave = new Promise<void>((resolve, reject) => {
+      this.resolvePendingSave = resolve;
+      this.rejectPendingSave = reject;
+    });
+
+    if (typeof window !== 'undefined' && typeof window.requestIdleCallback === 'function') {
+      this.idleCallbackId = window.requestIdleCallback(() => this.flushPendingWrites(), {
+        timeout: STORAGE_WRITE_TIMEOUT_MS,
+      });
+    } else if (typeof window !== 'undefined') {
+      this.timeoutId = window.setTimeout(() => this.flushPendingWrites(), 0);
+    } else {
+      this.timeoutId = setTimeout(() => this.flushPendingWrites(), 0) as unknown as number;
+    }
+
+    return this.pendingSave;
+  }
+
+  private cancelScheduledSave(): void {
+    if (
+      this.idleCallbackId !== null &&
+      typeof window !== 'undefined' &&
+      typeof window.cancelIdleCallback === 'function'
+    ) {
+      window.cancelIdleCallback(this.idleCallbackId);
+    }
+    if (this.timeoutId !== null) {
+      clearTimeout(this.timeoutId);
+    }
+    this.idleCallbackId = null;
+    this.timeoutId = null;
+  }
+
+  private flushPendingWrites(): void {
+    if (!this.pendingSave) {
+      return;
+    }
+
+    this.cancelScheduledSave();
+    const resolve = this.resolvePendingSave;
+    const reject = this.rejectPendingSave;
+    this.pendingSave = null;
+    this.resolvePendingSave = null;
+    this.rejectPendingSave = null;
+
+    try {
+      this.saveEvents();
+      resolve?.();
+    } catch (error) {
+      reject?.(error);
+    }
+  }
+
   async store(event: MGMEvent): Promise<void> {
     const events = this.loadEvents();
     events.push(event);
@@ -198,7 +267,7 @@ export class LocalStorageEventStorage implements IEventStorage {
       logger.debug(`Dropped ${excess} oldest events due to storage limit`);
     }
 
-    this.saveEvents();
+    await this.scheduleSave();
   }
 
   async fetchEvents(limit: number): Promise<MGMEvent[]> {
@@ -206,10 +275,15 @@ export class LocalStorageEventStorage implements IEventStorage {
     return events.slice(0, limit);
   }
 
-  async removeEvents(count: number): Promise<void> {
+  async removeEvents(count: number, clientEventIds?: string[]): Promise<void> {
     const events = this.loadEvents();
-    events.splice(0, count);
-    this.saveEvents();
+    if (clientEventIds?.length) {
+      const sentIds = new Set(clientEventIds);
+      this.events = events.filter((event) => !sentIds.has(event.client_event_id));
+    } else {
+      events.splice(0, count);
+    }
+    await this.scheduleSave();
   }
 
   async eventCount(): Promise<number> {
@@ -218,6 +292,11 @@ export class LocalStorageEventStorage implements IEventStorage {
 
   async clear(): Promise<void> {
     this.events = [];
+    this.cancelScheduledSave();
+    this.pendingSave = null;
+    this.resolvePendingSave?.();
+    this.resolvePendingSave = null;
+    this.rejectPendingSave = null;
     try {
       localStorage.removeItem(STORAGE_KEY);
     } catch (e) {
@@ -230,6 +309,17 @@ export class LocalStorageEventStorage implements IEventStorage {
    */
   setMaxEvents(maxEvents: number): void {
     this.maxEvents = Math.max(maxEvents, Constraints.MIN_STORED_EVENTS);
+  }
+}
+
+/**
+ * Persist any queued LocalStorageEventStorage mutation immediately.
+ * Used by browser teardown paths so deferred writes cannot lose events.
+ */
+export function flushPendingStorageWrites(storage: IEventStorage): void {
+  if (storage instanceof LocalStorageEventStorage) {
+    const flushable = storage as unknown as { flushPendingWrites(): void };
+    flushable.flushPendingWrites();
   }
 }
 
