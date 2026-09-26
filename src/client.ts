@@ -929,19 +929,19 @@ export class MostlyGoodMetrics {
   }
 
   private setupStoragePersistenceListeners(): void {
-    if (typeof window !== 'undefined') {
+    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
       window.addEventListener('pagehide', this.handleStoragePageHide);
     }
-    if (typeof document !== 'undefined') {
+    if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
       document.addEventListener('visibilitychange', this.handleStorageVisibilityChange);
     }
   }
 
   private removeStoragePersistenceListeners(): void {
-    if (typeof window !== 'undefined') {
+    if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
       window.removeEventListener('pagehide', this.handleStoragePageHide);
     }
-    if (typeof document !== 'undefined') {
+    if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
       document.removeEventListener('visibilitychange', this.handleStorageVisibilityChange);
     }
   }

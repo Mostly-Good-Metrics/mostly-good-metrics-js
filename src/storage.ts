@@ -129,8 +129,18 @@ export class InMemoryEventStorage implements IEventStorage {
 
   async removeEvents(count: number, clientEventIds?: string[]): Promise<void> {
     if (clientEventIds?.length) {
-      const sentIds = new Set(clientEventIds);
-      this.events = this.events.filter((event) => !sentIds.has(event.client_event_id));
+      const sentIds = new Set(clientEventIds.filter(Boolean));
+      let idlessEventsToRemove = Math.max(0, count - sentIds.size);
+      this.events = this.events.filter((event) => {
+        if (event.client_event_id) {
+          return !sentIds.has(event.client_event_id);
+        }
+        if (idlessEventsToRemove > 0) {
+          idlessEventsToRemove -= 1;
+          return false;
+        }
+        return true;
+      });
     } else {
       this.events.splice(0, count);
     }
@@ -164,6 +174,7 @@ export class LocalStorageEventStorage implements IEventStorage {
   private rejectPendingSave: ((error: unknown) => void) | null = null;
   private idleCallbackId: number | null = null;
   private timeoutId: number | null = null;
+  private dirty = false;
 
   constructor(maxEvents: number = Constraints.MIN_STORED_EVENTS) {
     this.maxEvents = Math.max(maxEvents, Constraints.MIN_STORED_EVENTS);
@@ -199,6 +210,7 @@ export class LocalStorageEventStorage implements IEventStorage {
   }
 
   private scheduleSave(): Promise<void> {
+    this.dirty = true;
     if (this.pendingSave) {
       return this.pendingSave;
     }
@@ -237,7 +249,7 @@ export class LocalStorageEventStorage implements IEventStorage {
   }
 
   private flushPendingWrites(): void {
-    if (!this.pendingSave) {
+    if (!this.dirty) {
       return;
     }
 
@@ -250,6 +262,7 @@ export class LocalStorageEventStorage implements IEventStorage {
 
     try {
       this.saveEvents();
+      this.dirty = false;
       resolve?.();
     } catch (error) {
       reject?.(error);
@@ -278,8 +291,18 @@ export class LocalStorageEventStorage implements IEventStorage {
   async removeEvents(count: number, clientEventIds?: string[]): Promise<void> {
     const events = this.loadEvents();
     if (clientEventIds?.length) {
-      const sentIds = new Set(clientEventIds);
-      this.events = events.filter((event) => !sentIds.has(event.client_event_id));
+      const sentIds = new Set(clientEventIds.filter(Boolean));
+      let idlessEventsToRemove = Math.max(0, count - sentIds.size);
+      this.events = events.filter((event) => {
+        if (event.client_event_id) {
+          return !sentIds.has(event.client_event_id);
+        }
+        if (idlessEventsToRemove > 0) {
+          idlessEventsToRemove -= 1;
+          return false;
+        }
+        return true;
+      });
     } else {
       events.splice(0, count);
     }
@@ -293,6 +316,7 @@ export class LocalStorageEventStorage implements IEventStorage {
   async clear(): Promise<void> {
     this.events = [];
     this.cancelScheduledSave();
+    this.dirty = false;
     this.pendingSave = null;
     this.resolvePendingSave?.();
     this.resolvePendingSave = null;

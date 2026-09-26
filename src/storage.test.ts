@@ -1,4 +1,9 @@
-import { InMemoryEventStorage, LocalStorageEventStorage, persistence } from './storage';
+import {
+  flushPendingStorageWrites,
+  InMemoryEventStorage,
+  LocalStorageEventStorage,
+  persistence,
+} from './storage';
 import { MGMEvent } from './types';
 
 const createMockEvent = (name: string): MGMEvent => ({
@@ -55,6 +60,23 @@ describe('InMemoryEventStorage', () => {
     const events = await storage.fetchEvents(10);
     expect(events).toHaveLength(1);
     expect(events[0].name).toBe('third');
+  });
+
+  it('should remove only the sent portion of an ID-less legacy queue', async () => {
+    const storage = new InMemoryEventStorage(250);
+    for (let index = 0; index < 250; index += 1) {
+      await storage.store(createMockEvent(`legacy-${index}`));
+    }
+    const sentEvents = await storage.fetchEvents(100);
+
+    await storage.removeEvents(
+      sentEvents.length,
+      sentEvents.map((event) => event.client_event_id)
+    );
+
+    const remaining = await storage.fetchEvents(250);
+    expect(remaining).toHaveLength(150);
+    expect(remaining[0].name).toBe('legacy-100');
   });
 
   it('should clear all events', async () => {
@@ -183,6 +205,42 @@ describe('LocalStorageEventStorage', () => {
     // Should not throw and should return empty array
     const events = await storage.fetchEvents(10);
     expect(events).toHaveLength(0);
+  });
+
+  it('should preserve the unsent portion of a persisted ID-less legacy queue', async () => {
+    const legacyEvents = Array.from({ length: 250 }, (_, index) =>
+      createMockEvent(`legacy-${index}`)
+    );
+    localStorage.setItem('mostlygoodmetrics_events', JSON.stringify(legacyEvents));
+    const storage = new LocalStorageEventStorage(250);
+    const sentEvents = await storage.fetchEvents(100);
+
+    await storage.removeEvents(
+      sentEvents.length,
+      sentEvents.map((event) => event.client_event_id)
+    );
+
+    const remaining = await storage.fetchEvents(250);
+    expect(remaining).toHaveLength(150);
+    expect(remaining[0].name).toBe('legacy-100');
+  });
+
+  it('should retry a failed deferred write during teardown', async () => {
+    (localStorage.setItem as jest.Mock).mockImplementationOnce(() => {
+      throw new DOMException('Quota exceeded', 'QuotaExceededError');
+    });
+
+    await expect(storage.store(createMockEvent('retry-me'))).rejects.toThrow(
+      'Failed to save events to localStorage'
+    );
+    expect(localStorage.setItem).toHaveBeenCalledTimes(1);
+
+    flushPendingStorageWrites(storage);
+
+    expect(localStorage.setItem).toHaveBeenCalledTimes(2);
+    expect(JSON.parse((localStorage.setItem as jest.Mock).mock.calls[1][1])).toEqual([
+      expect.objectContaining({ name: 'retry-me' }),
+    ]);
   });
 
   it('should only remove the requested event when names and timestamps match', async () => {

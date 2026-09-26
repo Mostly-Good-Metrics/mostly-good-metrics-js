@@ -91,6 +91,31 @@ describe('MostlyGoodMetrics', () => {
 
       expect(instance1).toBe(instance2);
     });
+
+    it('should configure when window lacks DOM event listener methods', () => {
+      const originalAddEventListener = window.addEventListener;
+      const originalRemoveEventListener = window.removeEventListener;
+      Object.defineProperties(window, {
+        addEventListener: { configurable: true, value: undefined },
+        removeEventListener: { configurable: true, value: undefined },
+      });
+
+      try {
+        expect(() =>
+          MostlyGoodMetrics.configure({
+            apiKey: 'test-key',
+            storage,
+            networkClient,
+            trackAppLifecycleEvents: false,
+          })
+        ).not.toThrow();
+      } finally {
+        Object.defineProperties(window, {
+          addEventListener: { configurable: true, value: originalAddEventListener },
+          removeEventListener: { configurable: true, value: originalRemoveEventListener },
+        });
+      }
+    });
   });
 
   describe('web analytics', () => {
