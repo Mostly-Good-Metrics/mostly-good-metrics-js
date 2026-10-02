@@ -26,7 +26,11 @@ export function isDebugEnabled(): boolean {
  */
 export function debug(message: string, ...args: unknown[]): void {
   if (debugEnabled) {
-    console.log(`${LOG_PREFIX} [DEBUG]`, message, ...args);
+    try {
+      console.log(`${LOG_PREFIX} [DEBUG]`, message, ...args);
+    } catch {
+      // Logging integrations must never interrupt the host application.
+    }
   }
 }
 
@@ -35,7 +39,11 @@ export function debug(message: string, ...args: unknown[]): void {
  */
 export function info(message: string, ...args: unknown[]): void {
   if (debugEnabled) {
-    console.info(`${LOG_PREFIX} [INFO]`, message, ...args);
+    try {
+      console.info(`${LOG_PREFIX} [INFO]`, message, ...args);
+    } catch {
+      // Logging integrations must never interrupt the host application.
+    }
   }
 }
 
@@ -43,14 +51,22 @@ export function info(message: string, ...args: unknown[]): void {
  * Log a warning message (always shown).
  */
 export function warn(message: string, ...args: unknown[]): void {
-  console.warn(`${LOG_PREFIX} [WARN]`, message, ...args);
+  try {
+    console.warn(`${LOG_PREFIX} [WARN]`, message, ...args);
+  } catch {
+    // Logging integrations must never interrupt the host application.
+  }
 }
 
 /**
  * Log an error message (always shown).
  */
 export function error(message: string, ...args: unknown[]): void {
-  console.error(`${LOG_PREFIX} [ERROR]`, message, ...args);
+  try {
+    console.error(`${LOG_PREFIX} [ERROR]`, message, ...args);
+  } catch {
+    // Logging integrations must never interrupt the host application.
+  }
 }
 
 export const logger = {

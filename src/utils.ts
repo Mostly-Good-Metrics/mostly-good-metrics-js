@@ -16,9 +16,13 @@ import {
  * Generate a UUID v4 string.
  */
 export function generateUUID(): string {
-  // Use crypto.randomUUID if available (modern browsers and Node.js 19+)
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
+  // Native/hybrid crypto shims may exist before their module is initialized.
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+  } catch {
+    /* Use the existing non-cryptographic analytics-ID fallback. */
   }
 
   // Fallback implementation
@@ -36,17 +40,22 @@ export function generateUUID(): string {
 function generateRandomString(length: number): string {
   const chars = '0123456789abcdefghijklmnopqrstuvwxyz';
   let result = '';
-  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
-    const array = new Uint8Array(length);
-    crypto.getRandomValues(array);
-    for (let i = 0; i < length; i++) {
-      result += chars[array[i] % chars.length];
+  try {
+    if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+      const array = new Uint8Array(length);
+      crypto.getRandomValues(array);
+      for (let i = 0; i < length; i++) {
+        result += chars[array[i] % chars.length];
+      }
+      return result;
     }
-  } else {
-    for (let i = 0; i < length; i++) {
-      result += chars[Math.floor(Math.random() * chars.length)];
-    }
+  } catch {
+    /* Use the existing non-cryptographic analytics-ID fallback. */
   }
+  for (let i = 0; i < length; i++) {
+    result += chars[Math.floor(Math.random() * chars.length)];
+  }
+
   return result;
 }
 
@@ -111,7 +120,12 @@ export function sanitizeProperties(
     return undefined;
   }
 
-  const sanitized = sanitizeValue(properties, 0, maxDepth);
+  let sanitized: EventPropertyValue;
+  try {
+    sanitized = sanitizeValue(properties, 0, maxDepth, { remaining: 1024 });
+  } catch {
+    return undefined;
+  }
   if (typeof sanitized === 'object' && sanitized !== null && !Array.isArray(sanitized)) {
     return sanitized as EventProperties;
   }
@@ -125,8 +139,12 @@ export function sanitizeProperties(
 function sanitizeValue(
   value: EventPropertyValue,
   depth: number,
-  maxDepth: number
+  maxDepth: number,
+  budget: { remaining: number }
 ): EventPropertyValue {
+  if (budget.remaining-- <= 0) {
+    return null;
+  }
   // Null is valid
   if (value === null) {
     return null;
@@ -134,7 +152,7 @@ function sanitizeValue(
 
   // Primitives
   if (typeof value === 'boolean' || typeof value === 'number') {
-    return value;
+    return typeof value === 'number' && !Number.isFinite(value) ? null : value;
   }
 
   // Strings - truncate if needed
@@ -143,9 +161,14 @@ function sanitizeValue(
       logger.debug(
         `Truncating string property from ${value.length} to ${Constraints.MAX_STRING_PROPERTY_LENGTH} characters`
       );
-      return value.substring(0, Constraints.MAX_STRING_PROPERTY_LENGTH);
+      // A V8 substring can retain the entire original (megabytes) as its
+      // backing string. Round-trip only the bounded slice to own a small copy.
+      return JSON.parse(
+        JSON.stringify(value.substring(0, Constraints.MAX_STRING_PROPERTY_LENGTH))
+      ) as string;
     }
-    return value;
+    // Valid-size input can itself be a slice of a huge caller string.
+    return value.length > 12 ? (JSON.parse(JSON.stringify(value)) as string) : value;
   }
 
   // Arrays
@@ -154,7 +177,16 @@ function sanitizeValue(
       logger.debug(`Max property depth reached, omitting nested array`);
       return null;
     }
-    return value.map((item) => sanitizeValue(item, depth + 1, maxDepth));
+    return Array.from(
+      { length: Math.min(value.length, Math.max(0, budget.remaining)) },
+      (_, index) => {
+        try {
+          return sanitizeValue(value[index], depth + 1, maxDepth, budget);
+        } catch {
+          return null;
+        }
+      }
+    );
   }
 
   // Objects
@@ -165,8 +197,24 @@ function sanitizeValue(
     }
 
     const result: Record<string, EventPropertyValue> = {};
-    for (const [key, val] of Object.entries(value)) {
-      result[key] = sanitizeValue(val, depth + 1, maxDepth);
+    for (const key of Object.keys(value)) {
+      if (key.length > Constraints.MAX_PROPERTY_SIZE_BYTES) {
+        continue;
+      }
+      if (budget.remaining <= 0) {
+        break;
+      }
+      try {
+        // Define own data properties: even __proto__ must remain ordinary data.
+        Object.defineProperty(result, key, {
+          value: sanitizeValue(value[key], depth + 1, maxDepth, budget),
+          enumerable: true,
+          writable: true,
+          configurable: true,
+        });
+      } catch {
+        // Omit unreadable getters/proxies without losing the other properties.
+      }
     }
     return result;
   }
@@ -179,19 +227,31 @@ function sanitizeValue(
  * Resolve configuration with defaults.
  */
 export function resolveConfiguration(config: MGMConfiguration): ResolvedConfiguration {
+  // Browser/Node timers use a signed 32-bit millisecond delay. Overflowing it
+  // can become a 1ms loop in Node instead of a long flush interval.
+  const maxTimerMilliseconds = 2_147_483_647;
+  const finite = (value: number | undefined, fallback: number): number =>
+    Number.isFinite(value) ? (value as number) : fallback;
   const maxBatchSize = Math.min(
-    Math.max(config.maxBatchSize ?? DefaultConfiguration.maxBatchSize, Constraints.MIN_BATCH_SIZE),
+    Math.max(
+      finite(config.maxBatchSize, DefaultConfiguration.maxBatchSize),
+      Constraints.MIN_BATCH_SIZE
+    ),
     Constraints.MAX_BATCH_SIZE
   );
-
-  const flushInterval = Math.max(
-    config.flushInterval ?? DefaultConfiguration.flushInterval,
-    Constraints.MIN_FLUSH_INTERVAL
+  const flushInterval = Math.min(
+    Math.max(
+      finite(config.flushInterval, DefaultConfiguration.flushInterval),
+      Constraints.MIN_FLUSH_INTERVAL
+    ),
+    Math.floor(maxTimerMilliseconds / 1000)
   );
-
-  const maxStoredEvents = Math.max(
-    config.maxStoredEvents ?? DefaultConfiguration.maxStoredEvents,
-    Constraints.MIN_STORED_EVENTS
+  const maxStoredEvents = Math.min(
+    Math.max(
+      finite(config.maxStoredEvents, DefaultConfiguration.maxStoredEvents),
+      Constraints.MIN_STORED_EVENTS
+    ),
+    Number.MAX_SAFE_INTEGER
   );
 
   return {
@@ -205,9 +265,12 @@ export function resolveConfiguration(config: MGMConfiguration): ResolvedConfigur
     trackAppLifecycleEvents:
       config.trackAppLifecycleEvents ?? DefaultConfiguration.trackAppLifecycleEvents,
     trackPageViews: config.trackPageViews ?? DefaultConfiguration.trackPageViews,
-    sessionTimeoutMinutes: Math.max(
-      config.sessionTimeoutMinutes ?? DefaultConfiguration.sessionTimeoutMinutes,
-      Constraints.MIN_SESSION_TIMEOUT_MINUTES
+    sessionTimeoutMinutes: Math.min(
+      Math.max(
+        finite(config.sessionTimeoutMinutes, DefaultConfiguration.sessionTimeoutMinutes),
+        Constraints.MIN_SESSION_TIMEOUT_MINUTES
+      ),
+      Math.floor(maxTimerMilliseconds / 60_000)
     ),
     existingInstallation: config.existingInstallation ?? DefaultConfiguration.existingInstallation,
     bundleId: config.bundleId ?? detectBundleId(),

@@ -57,6 +57,52 @@ describe('FetchNetworkClient', () => {
     jest.restoreAllMocks();
   });
 
+  describe('failure containment', () => {
+    it.each(['invalid', '-1', 'Infinity', '1e1000', '9999999999999999999999', '60seconds'])(
+      'bounds malformed Retry-After %s',
+      async (retryAfter) => {
+        jest.useFakeTimers();
+        try {
+          mockFetch.mockResolvedValue({
+            status: 429,
+            headers: new Headers({ 'Retry-After': retryAfter }),
+          });
+          const result = await networkClient.sendEvents(createMockPayload(), createMockConfig());
+          expect(result.success).toBe(false);
+          expect(networkClient.isRateLimited()).toBe(true);
+          expect(networkClient.getRetryAfterTime()?.getTime()).toBe(Date.now() + 60_000);
+          jest.advanceTimersByTime(60_000);
+          expect(networkClient.isRateLimited()).toBe(false);
+        } finally {
+          jest.useRealTimers();
+        }
+      }
+    );
+
+    it('contains serialization failures without starting a request', async () => {
+      const payload = createMockPayload();
+      const circular: Record<string, unknown> = {};
+      circular.self = circular;
+      payload.events[0].properties = circular as never;
+      await expect(networkClient.sendEvents(payload, createMockConfig())).resolves.toMatchObject({
+        success: false,
+        shouldRetry: true,
+      });
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('clears timeout resources when fetch rejects', async () => {
+      jest.useFakeTimers();
+      try {
+        mockFetch.mockRejectedValue(new Error('offline'));
+        await networkClient.sendEvents(createMockPayload(), createMockConfig());
+        expect(jest.getTimerCount()).toBe(0);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+  });
+
   describe('SDK identification headers', () => {
     it('should include X-MGM-SDK header from config', async () => {
       const config = createMockConfig({ sdk: 'react-native' });

@@ -18,6 +18,33 @@ const MAX_KEEPALIVE_BYTES = 60_000;
 // "Update SDK version constant in code" step rewrites this line on release.
 const SDK_VERSION = '0.13.0';
 
+interface PendingRequest {
+  controller: AbortController;
+  timer: ReturnType<typeof setTimeout>;
+}
+const pendingRequests = new WeakMap<INetworkClient, Set<PendingRequest>>();
+
+// Internal lifecycle hook, deliberately not exported from the package entrypoint.
+export function cancelPendingNetworkRequests(client: INetworkClient): void {
+  const requests = pendingRequests.get(client);
+  if (!requests) {
+    return;
+  }
+  for (const request of requests) {
+    try {
+      clearTimeout(request.timer);
+    } catch (error) {
+      logger.error('Failed to clear event timeout', error);
+    }
+    try {
+      request.controller.abort();
+    } catch (error) {
+      logger.error('Failed to abort event request', error);
+    }
+  }
+  pendingRequests.delete(client);
+}
+
 /**
  * Compress data using gzip if available (browser CompressionStream API).
  * Falls back to uncompressed data if compression is not available.
@@ -79,41 +106,56 @@ export class FetchNetworkClient implements INetworkClient {
       };
     }
 
-    const url = `${config.baseURL}${EVENTS_ENDPOINT}`;
-    const jsonBody = JSON.stringify(payload);
-    const keepalive =
-      (options?.keepalive ?? false) &&
-      new TextEncoder().encode(jsonBody).byteLength <= MAX_KEEPALIVE_BYTES;
-    // Start exit-time requests immediately. Compression is asynchronous and
-    // browsers may suspend a page before that work finishes.
-    const { data, compressed } = keepalive
-      ? { data: jsonBody, compressed: false }
-      : await compressIfNeeded(jsonBody);
-
-    const osVersion = config.osVersion || getOSVersion();
-    const sdkVersion = config.sdkVersion || SDK_VERSION;
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${config.apiKey}`,
-      'X-MGM-SDK': config.sdk,
-      'X-MGM-SDK-Version': sdkVersion,
-      'X-MGM-Platform': config.platform,
-      ...(osVersion && { 'X-MGM-Platform-Version': osVersion }),
-    };
-
-    if (config.bundleId) {
-      headers['X-MGM-Bundle-Id'] = config.bundleId;
-    }
-
-    if (compressed) {
-      headers['Content-Encoding'] = 'gzip';
-    }
-
-    logger.debug(`Sending ${payload.events.length} events to ${url}`);
-
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    let request: PendingRequest | undefined;
+    let requests = pendingRequests.get(this);
     try {
+      const url = `${config.baseURL}${EVENTS_ENDPOINT}`;
+      const jsonBody = JSON.stringify(payload);
+      const keepalive =
+        (options?.keepalive ?? false) &&
+        new TextEncoder().encode(jsonBody).byteLength <= MAX_KEEPALIVE_BYTES;
+      // Start exit-time requests immediately. Compression is asynchronous and
+      // browsers may suspend a page before that work finishes.
+      const { data, compressed } = keepalive
+        ? { data: jsonBody, compressed: false }
+        : await compressIfNeeded(jsonBody);
+
+      const osVersion = config.osVersion || getOSVersion();
+      const sdkVersion = config.sdkVersion || SDK_VERSION;
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${config.apiKey}`,
+        'X-MGM-SDK': config.sdk,
+        'X-MGM-SDK-Version': sdkVersion,
+        'X-MGM-Platform': config.platform,
+        ...(osVersion && { 'X-MGM-Platform-Version': osVersion }),
+      };
+
+      if (config.bundleId) {
+        headers['X-MGM-Bundle-Id'] = config.bundleId;
+      }
+
+      if (compressed) {
+        headers['Content-Encoding'] = 'gzip';
+      }
+
+      logger.debug(`Sending ${payload.events.length} events to ${url}`);
+
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      timeoutId = setTimeout(() => {
+        try {
+          controller.abort();
+        } catch (error) {
+          logger.error('Failed to abort event request', error);
+        }
+      }, REQUEST_TIMEOUT_MS);
+      if (!requests) {
+        requests = new Set();
+        pendingRequests.set(this, requests);
+      }
+      request = { controller, timer: timeoutId };
+      requests.add(request);
 
       const response = await fetch(url, {
         method: 'POST',
@@ -122,8 +164,6 @@ export class FetchNetworkClient implements INetworkClient {
         signal: controller.signal,
         keepalive,
       });
-
-      clearTimeout(timeoutId);
 
       return this.handleResponse(response);
     } catch (e) {
@@ -145,6 +185,17 @@ export class FetchNetworkClient implements INetworkClient {
         ),
         shouldRetry: true,
       };
+    } finally {
+      if (timeoutId !== undefined) {
+        try {
+          clearTimeout(timeoutId);
+        } catch (error) {
+          logger.error('Failed to clear event timeout', error);
+        }
+      }
+      if (request) {
+        requests?.delete(request);
+      }
     }
   }
 
@@ -163,7 +214,10 @@ export class FetchNetworkClient implements INetworkClient {
     // Rate limited
     if (statusCode === 429) {
       const retryAfterHeader = response.headers.get('Retry-After');
-      const retryAfterSeconds = retryAfterHeader ? parseInt(retryAfterHeader, 10) : 60;
+      const parsedDelay =
+        retryAfterHeader && /^\d+$/.test(retryAfterHeader.trim()) ? Number(retryAfterHeader) : NaN;
+      const retryAfterSeconds =
+        Number.isFinite(parsedDelay) && parsedDelay >= 0 && parsedDelay <= 86400 ? parsedDelay : 60;
 
       this.retryAfterTime = new Date(Date.now() + retryAfterSeconds * 1000);
 
