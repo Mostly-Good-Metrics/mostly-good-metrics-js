@@ -80,6 +80,7 @@ export class MostlyGoodMetrics {
   private originalPushState: typeof history.pushState | null = null;
   private originalReplaceState: typeof history.replaceState | null = null;
   private optedOut: boolean;
+  private evaluatingContext = false;
 
   // A/B testing state
   private assignedVariants: Record<string, string> = {}; // Server-assigned variants
@@ -402,91 +403,100 @@ export class MostlyGoodMetrics {
    * Track an event with the given name and optional properties.
    */
   track(name: string, properties?: EventProperties): void {
-    if (this.optedOut) {
-      logger.debug(`Tracking is opted out, ignoring event: ${name}`);
-      return;
-    }
-
     try {
-      validateEventName(name);
-    } catch (e) {
-      logger.error(`Invalid event name: ${name}`, e);
-      return;
+      if (this.optedOut) {
+        logger.debug(`Tracking is opted out, ignoring event: ${name}`);
+        return;
+      }
+
+      try {
+        validateEventName(name);
+      } catch (e) {
+        logger.error(`Invalid event name: ${name}`, e);
+        return;
+      }
+
+      if (
+        !Object.values(SystemEvents).includes(
+          name as (typeof SystemEvents)[keyof typeof SystemEvents]
+        )
+      ) {
+        this.warnOnReservedPropertyKeys(properties);
+      }
+
+      this.sessionIdValue = this.resolveSessionId();
+      const sanitizedProperties = sanitizeProperties(properties);
+      const contextProperties = this.getDynamicContext();
+      const superProperties = sanitizeProperties(persistence.getSuperProperties());
+
+      // Merge properties: super properties < dynamic context < event properties <
+      // system properties. System properties are always SDK-owned.
+      const browser = getBrowserInfo();
+      const mergedProperties: EventProperties = {
+        ...superProperties,
+        ...contextProperties,
+        ...sanitizedProperties,
+        ...(this.config.collectDeviceProperties
+          ? {
+              [SystemProperties.DEVICE_TYPE]: detectDeviceType(),
+              [SystemProperties.DEVICE_MODEL]: getDeviceModel(),
+              [SystemProperties.BROWSER]: browser.name,
+              [SystemProperties.BROWSER_VERSION]: browser.version,
+              [SystemProperties.OS]: getOSName(),
+              [SystemProperties.SCREEN_WIDTH]: this.browserNumber('screen', 'width'),
+              [SystemProperties.SCREEN_HEIGHT]: this.browserNumber('screen', 'height'),
+              [SystemProperties.VIEWPORT_WIDTH]: this.browserNumber('window', 'innerWidth'),
+              [SystemProperties.VIEWPORT_HEIGHT]: this.browserNumber('window', 'innerHeight'),
+              [SystemProperties.USER_AGENT]:
+                typeof navigator === 'undefined' ? '' : navigator.userAgent,
+            }
+          : {}),
+        [SystemProperties.SDK]: this.config.sdk,
+      };
+
+      const event: MGMEvent = {
+        name,
+        client_event_id: generateUUID(),
+        timestamp: getISOTimestamp(),
+
+        user_id: this.userId ?? this.anonymousIdValue,
+
+        session_id: this.sessionIdValue,
+        platform: this.config.platform,
+        app_version: this.config.appVersion || undefined,
+        os_version: this.config.osVersion || getOSVersion() || undefined,
+        environment: this.config.environment,
+        locale: this.config.collectDeviceProperties ? getLocale() : undefined,
+        timezone: this.config.collectDeviceProperties ? getTimezone() : undefined,
+        properties: Object.keys(mergedProperties).length > 0 ? mergedProperties : undefined,
+      };
+
+      logger.debug(`Tracking event: ${name}`, event);
+
+      // Store event asynchronously
+      this.runStorageOperation(() => this.storage.store(event), 'Failed to store event');
+
+      // Check if we should flush due to batch size
+      void this.checkBatchSize();
+    } catch (error) {
+      logger.error('Failed to capture event', error);
     }
-
-    if (
-      !Object.values(SystemEvents).includes(
-        name as (typeof SystemEvents)[keyof typeof SystemEvents]
-      )
-    ) {
-      this.warnOnReservedPropertyKeys(properties);
-    }
-
-    this.sessionIdValue = this.resolveSessionId();
-    const sanitizedProperties = sanitizeProperties(properties);
-    const contextProperties = this.getDynamicContext();
-    const superProperties = persistence.getSuperProperties();
-
-    // Merge properties: super properties < dynamic context < event properties <
-    // system properties. System properties are always SDK-owned.
-    const browser = getBrowserInfo();
-    const mergedProperties: EventProperties = {
-      ...superProperties,
-      ...contextProperties,
-      ...sanitizedProperties,
-      ...(this.config.collectDeviceProperties
-        ? {
-            [SystemProperties.DEVICE_TYPE]: detectDeviceType(),
-            [SystemProperties.DEVICE_MODEL]: getDeviceModel(),
-            [SystemProperties.BROWSER]: browser.name,
-            [SystemProperties.BROWSER_VERSION]: browser.version,
-            [SystemProperties.OS]: getOSName(),
-            [SystemProperties.SCREEN_WIDTH]: this.browserNumber('screen', 'width'),
-            [SystemProperties.SCREEN_HEIGHT]: this.browserNumber('screen', 'height'),
-            [SystemProperties.VIEWPORT_WIDTH]: this.browserNumber('window', 'innerWidth'),
-            [SystemProperties.VIEWPORT_HEIGHT]: this.browserNumber('window', 'innerHeight'),
-            [SystemProperties.USER_AGENT]:
-              typeof navigator === 'undefined' ? '' : navigator.userAgent,
-          }
-        : {}),
-      [SystemProperties.SDK]: this.config.sdk,
-    };
-
-    const event: MGMEvent = {
-      name,
-      client_event_id: generateUUID(),
-      timestamp: getISOTimestamp(),
-
-      user_id: this.userId ?? this.anonymousIdValue,
-
-      session_id: this.sessionIdValue,
-      platform: this.config.platform,
-      app_version: this.config.appVersion || undefined,
-      os_version: this.config.osVersion || getOSVersion() || undefined,
-      environment: this.config.environment,
-      locale: this.config.collectDeviceProperties ? getLocale() : undefined,
-      timezone: this.config.collectDeviceProperties ? getTimezone() : undefined,
-      properties: Object.keys(mergedProperties).length > 0 ? mergedProperties : undefined,
-    };
-
-    logger.debug(`Tracking event: ${name}`, event);
-
-    // Store event asynchronously
-    this.storage.store(event).catch((e) => {
-      logger.error('Failed to store event', e);
-    });
-
-    // Check if we should flush due to batch size
-    void this.checkBatchSize();
   }
 
   private getDynamicContext(): EventProperties {
-    if (!this.config.contextProvider) {
+    if (!this.config.contextProvider || this.evaluatingContext) {
       return {};
     }
 
+    this.evaluatingContext = true;
     try {
       const context = this.config.contextProvider();
+      if (context && typeof (context as unknown as { then?: unknown }).then === 'function') {
+        void Promise.resolve(context).catch((error) =>
+          logger.error('Async contextProvider rejected', error)
+        );
+        return {};
+      }
       this.warnOnReservedPropertyKeys(context);
       return sanitizeProperties(context) ?? {};
     } catch (error) {
@@ -494,6 +504,8 @@ export class MostlyGoodMetrics {
         logger.warn('contextProvider threw; continuing without dynamic context', error);
       }
       return {};
+    } finally {
+      this.evaluatingContext = false;
     }
   }
 
@@ -537,10 +549,22 @@ export class MostlyGoodMetrics {
     logger.debug(`Identifying user: ${userId}`);
     persistence.setUserId(userId);
 
-    // If profile data is provided, check if we should send $identify event
-    // eslint-disable-next-line @typescript-eslint/prefer-nullish-coalescing -- intentional truthy check for non-empty strings
-    if (profile && (profile.email || profile.name)) {
-      this.sendIdentifyEventIfNeeded(userId, profile);
+    // Snapshot each profile field once; getters supplied by consuming apps may throw.
+    if (profile) {
+      const snapshot: UserProfile = {};
+      for (const key of ['email', 'name'] as const) {
+        try {
+          const value = profile[key];
+          if (typeof value === 'string') {
+            snapshot[key] = value;
+          }
+        } catch (error) {
+          logger.error('Failed to read identify profile', error);
+        }
+      }
+      if ((snapshot.email ?? '') !== '' || (snapshot.name ?? '') !== '') {
+        this.sendIdentifyEventIfNeeded(userId, snapshot);
+      }
     }
 
     // If user ID changed, refetch experiments immediately for the new user.
@@ -555,7 +579,10 @@ export class MostlyGoodMetrics {
     if (previousUserId !== userId && this.config.experimentMode === 'server') {
       logger.debug('User identity changed, refetching experiments');
       this.resetExperimentsReadyPromise();
-      void this.fetchExperiments();
+      void this.fetchExperiments().catch((error) => {
+        logger.error('Experiment refresh failed', error);
+        this.markExperimentsReady();
+      });
     }
   }
 
@@ -644,9 +671,10 @@ export class MostlyGoodMetrics {
       this.sessionIdValue = this.resolveSessionId();
 
       // Purge queued (unsent) events
-      this.storage.clear().catch((e) => {
-        logger.warn('Failed to clear queued events during identity reset', e);
-      });
+      this.runStorageOperation(
+        () => this.storage.clear(),
+        'Failed to clear queued events during identity reset'
+      );
 
       // Clear super properties (including $experiment_* assignments)
       persistence.clearSuperProperties();
@@ -660,7 +688,10 @@ export class MostlyGoodMetrics {
       if (this.config.experimentMode === 'server') {
         // Refetch experiments for the fresh identity (no-op while opted out)
         this.resetExperimentsReadyPromise();
-        void this.fetchExperiments();
+        void this.fetchExperiments().catch((error) => {
+          logger.error('Experiment refresh failed', error);
+          this.markExperimentsReady();
+        });
       }
       // Local mode: configs are identity-independent, nothing to refetch.
       // The next getVariant() re-buckets under the new anonymous ID.
@@ -705,9 +736,10 @@ export class MostlyGoodMetrics {
     persistence.setOptOutStatus(true);
 
     // Purge queued events so nothing tracked pre-opt-out is ever sent
-    this.storage.clear().catch((e) => {
-      logger.warn('Failed to clear queued events during opt-out', e);
-    });
+    this.runStorageOperation(
+      () => this.storage.clear(),
+      'Failed to clear queued events during opt-out'
+    );
   }
 
   /**
@@ -727,11 +759,17 @@ export class MostlyGoodMetrics {
         // Inline configs never need a fetch; otherwise load configs now
         if (!this.config.localExperiments) {
           this.resetExperimentsReadyPromise();
-          void this.fetchLocalExperimentConfigs();
+          void this.fetchLocalExperimentConfigs().catch((error) => {
+            logger.error('Experiment config refresh failed', error);
+            this.markExperimentsReady();
+          });
         }
       } else {
         this.resetExperimentsReadyPromise();
-        void this.fetchExperiments();
+        void this.fetchExperiments().catch((error) => {
+          logger.error('Experiment refresh failed', error);
+          this.markExperimentsReady();
+        });
       }
     }
   }
@@ -802,15 +840,20 @@ export class MostlyGoodMetrics {
    */
   setSuperProperty(key: string, value: EventProperties[string]): void {
     logger.debug(`Setting super property: ${key}`);
-    persistence.setSuperProperty(key, value);
+    const sanitized = sanitizeProperties({ [key]: value });
+    if (sanitized) {
+      persistence.setSuperProperties(sanitized);
+    }
   }
 
   /**
    * Set multiple super properties at once.
    */
   setSuperProperties(properties: EventProperties): void {
-    logger.debug(`Setting super properties: ${Object.keys(properties).join(', ')}`);
-    persistence.setSuperProperties(properties);
+    const sanitized = sanitizeProperties(properties);
+    if (sanitized) {
+      persistence.setSuperProperties(sanitized);
+    }
   }
 
   /**
@@ -860,9 +903,11 @@ export class MostlyGoodMetrics {
     const variant =
       this.config.experimentMode === 'local'
         ? this.resolveLocalVariant(experimentName)
-        : this.assignedVariants[experimentName];
+        : Object.prototype.hasOwnProperty.call(this.assignedVariants, experimentName)
+          ? this.assignedVariants[experimentName]
+          : undefined;
 
-    if (variant) {
+    if (typeof variant === 'string' && variant) {
       // Store as super property so it's attached to all events
       const propertyName = `$experiment_${this.toSnakeCase(experimentName)}`;
       this.setSuperProperty(propertyName, variant);
@@ -921,10 +966,22 @@ export class MostlyGoodMetrics {
   // =====================================================
 
   private async checkBatchSize(): Promise<void> {
-    const count = await this.storage.eventCount();
-    if (count >= this.config.maxBatchSize) {
-      logger.debug('Batch size threshold reached, triggering flush');
-      void this.flush();
+    try {
+      const count = await this.storage.eventCount();
+      if (count >= this.config.maxBatchSize) {
+        logger.debug('Batch size threshold reached, triggering flush');
+        await this.flush();
+      }
+    } catch (error) {
+      logger.error('Failed to check event batch size', error);
+    }
+  }
+
+  private runStorageOperation(operation: () => Promise<void>, message: string): void {
+    try {
+      void Promise.resolve(operation()).catch((error) => logger.error(message, error));
+    } catch (error) {
+      logger.error(message, error);
     }
   }
 
@@ -1051,7 +1108,7 @@ export class MostlyGoodMetrics {
       flushPendingStorageWrites(this.storage);
       // Persisted queues make the event durable, and an immediate flush gives
       // browsers a chance to deliver it before the tab is discarded.
-      void this.flushInternal(true);
+      void this.flushInternal(true).catch((error) => logger.error('Teardown flush failed', error));
     } else {
       this.pageVisibleAt = Date.now();
     }
@@ -1062,7 +1119,7 @@ export class MostlyGoodMetrics {
     flushPendingStorageWrites(this.storage);
     // Best effort at teardown; the persisted queue remains available for the
     // next visit if the browser suspends this asynchronous flush first.
-    void this.flushInternal(true);
+    void this.flushInternal(true).catch((error) => logger.error('Teardown flush failed', error));
   };
 
   private capturePageView(): void {
@@ -1151,7 +1208,9 @@ export class MostlyGoodMetrics {
         // Call onError callback if configured
         if (this.config.onError) {
           try {
-            this.config.onError(result.error);
+            void Promise.resolve(this.config.onError(result.error)).catch((error) =>
+              logger.error('Error in async onError callback', error)
+            );
           } catch (e) {
             logger.error('Error in onError callback', e);
           }
@@ -1198,7 +1257,7 @@ export class MostlyGoodMetrics {
     }
 
     this.flushTimer = setInterval(() => {
-      void this.flush();
+      void this.flush().catch((error) => logger.error('Automatic flush failed', error));
     }, this.config.flushInterval * 1000);
 
     logger.debug(`Started flush timer (${this.config.flushInterval}s interval)`);
@@ -1292,7 +1351,7 @@ export class MostlyGoodMetrics {
       // App backgrounded
       this.track(SystemEvents.APP_BACKGROUNDED);
       flushPendingStorageWrites(this.storage);
-      void this.flush(); // Flush when going to background
+      void this.flush().catch((error) => logger.error('Automatic flush failed', error)); // Flush when going to background
     } else {
       // App foregrounded
       this.track(SystemEvents.APP_OPENED);
@@ -1301,12 +1360,12 @@ export class MostlyGoodMetrics {
 
   private handleBeforeUnload = (): void => {
     flushPendingStorageWrites(this.storage);
-    void this.flushInternal(true);
+    void this.flushInternal(true).catch((error) => logger.error('Teardown flush failed', error));
   };
 
   private handlePageHide = (): void => {
     flushPendingStorageWrites(this.storage);
-    void this.flushInternal(true);
+    void this.flushInternal(true).catch((error) => logger.error('Teardown flush failed', error));
   };
 
   // =====================================================
@@ -1349,7 +1408,10 @@ export class MostlyGoodMetrics {
       // Revalidate in the background, throttled to at most once per hour
       if (cacheAge >= EXPERIMENTS_REFETCH_INTERVAL_MS) {
         logger.debug('Cached experiment variants are stale, revalidating in background');
-        void this.fetchExperiments();
+        void this.fetchExperiments().catch((error) => {
+          logger.error('Experiment refresh failed', error);
+          this.markExperimentsReady();
+        });
       }
       return;
     }
@@ -1468,7 +1530,10 @@ export class MostlyGoodMetrics {
 
       if (cacheAge >= EXPERIMENTS_REFETCH_INTERVAL_MS) {
         logger.debug('Cached local experiment configs are stale, revalidating in background');
-        void this.fetchLocalExperimentConfigs();
+        void this.fetchLocalExperimentConfigs().catch((error) => {
+          logger.error('Experiment config refresh failed', error);
+          this.markExperimentsReady();
+        });
       }
       return;
     }
@@ -1535,8 +1600,22 @@ export class MostlyGoodMetrics {
    */
   private setLocalExperimentConfigs(configs: MGMExperimentConfig[]): void {
     const byName: Record<string, MGMExperimentConfig> = {};
-    for (const config of configs) {
-      byName[config.name] = config;
+    for (const config of Array.isArray(configs) ? configs : []) {
+      if (
+        config &&
+        typeof config.id === 'string' &&
+        typeof config.name === 'string' &&
+        Array.isArray(config.variants) &&
+        config.variants.length > 0 &&
+        config.variants.every((variant) => typeof variant === 'string' && variant !== '')
+      ) {
+        Object.defineProperty(byName, config.name, {
+          value: { id: config.id, name: config.name, variants: [...config.variants] },
+          enumerable: true,
+          configurable: true,
+          writable: true,
+        });
+      }
     }
     this.localExperimentsByName = byName;
   }
@@ -1556,7 +1635,9 @@ export class MostlyGoodMetrics {
    * in the experiment's variants list.
    */
   private resolveLocalVariant(experimentName: string): string | null {
-    const config = this.localExperimentsByName[experimentName];
+    const config = Object.prototype.hasOwnProperty.call(this.localExperimentsByName, experimentName)
+      ? this.localExperimentsByName[experimentName]
+      : undefined;
     if (!config || config.variants.length === 0) {
       return null;
     }

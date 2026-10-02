@@ -66,17 +66,21 @@ function isCookieAvailable(): boolean {
  * Get a cookie value by name.
  */
 function getCookie(name: string): string | null {
-  if (!isCookieAvailable()) {
+  try {
+    if (!isCookieAvailable()) {
+      return null;
+    }
+    const cookies = document.cookie.split(';');
+    for (const cookie of cookies) {
+      const [cookieName, cookieValue] = cookie.trim().split('=');
+      if (cookieName === name) {
+        return decodeURIComponent(cookieValue);
+      }
+    }
+    return null;
+  } catch {
     return null;
   }
-  const cookies = document.cookie.split(';');
-  for (const cookie of cookies) {
-    const [cookieName, cookieValue] = cookie.trim().split('=');
-    if (cookieName === name) {
-      return decodeURIComponent(cookieValue);
-    }
-  }
-  return null;
 }
 
 /**
@@ -88,15 +92,20 @@ function setCookie(
   value: string,
   domain?: string,
   maxAge = 365 * 24 * 60 * 60
-): void {
-  if (!isCookieAvailable()) {
-    return;
+): boolean {
+  try {
+    if (!isCookieAvailable()) {
+      return false;
+    }
+    let cookieString = `${name}=${encodeURIComponent(value)}; path=/; max-age=${maxAge}; SameSite=Lax`;
+    if (domain) {
+      cookieString += `; domain=${domain}`;
+    }
+    document.cookie = cookieString;
+    return true;
+  } catch {
+    return false;
   }
-  let cookieString = `${name}=${encodeURIComponent(value)}; path=/; max-age=${maxAge}; SameSite=Lax`;
-  if (domain) {
-    cookieString += `; domain=${domain}`;
-  }
-  document.cookie = cookieString;
 }
 
 /**
@@ -188,7 +197,16 @@ export class LocalStorageEventStorage implements IEventStorage {
     try {
       const stored = localStorage.getItem(STORAGE_KEY);
       if (stored) {
-        this.events = JSON.parse(stored) as MGMEvent[];
+        const parsed: unknown = JSON.parse(stored);
+        this.events = Array.isArray(parsed)
+          ? parsed.filter(
+              (event): event is MGMEvent =>
+                event !== null &&
+                typeof event === 'object' &&
+                typeof (event as Record<string, unknown>).name === 'string' &&
+                typeof (event as Record<string, unknown>).timestamp === 'string'
+            )
+          : [];
       } else {
         this.events = [];
       }
@@ -435,6 +453,48 @@ class PersistenceManager {
   private inMemorySession: PersistedSession | null = null;
   private cookieDomain: string | undefined = undefined;
   private mode: PersistenceMode = 'localStorage+cookie';
+  private failedLocalWrites = new Set<string>();
+  private failedCookieWrites = new Set<string>();
+
+  private writeCookie(key: string, value: string, domain?: string, maxAge?: number): void {
+    if (setCookie(key, value, domain, maxAge)) {
+      this.failedCookieWrites.delete(key);
+    } else {
+      this.failedCookieWrites.add(key);
+    }
+  }
+  private readCookie(key: string, fallback: string | null = null): string | null {
+    return this.failedCookieWrites.has(key) ? fallback : getCookie(key);
+  }
+
+  private readLocalItem(key: string, fallback: string | null = null): string | null {
+    if (this.failedLocalWrites.has(key)) {
+      return fallback;
+    }
+    try {
+      return localStorage.getItem(key);
+    } catch {
+      return fallback;
+    }
+  }
+  private writeLocalItem(key: string, value: string): void {
+    try {
+      localStorage.setItem(key, value);
+      this.failedLocalWrites.delete(key);
+    } catch {
+      this.failedLocalWrites.add(key);
+      /* Keep in-memory state authoritative until a later write succeeds. */
+    }
+  }
+  private removeLocalItem(key: string): void {
+    try {
+      localStorage.removeItem(key);
+      this.failedLocalWrites.delete(key);
+    } catch {
+      this.failedLocalWrites.add(key);
+      /* Keep in-memory state authoritative until a later write succeeds. */
+    }
+  }
 
   /**
    * Configure persistence settings.
@@ -477,7 +537,7 @@ class PersistenceManager {
    */
   getUserId(): string | null {
     if (this.shouldUseLocalStorage()) {
-      return localStorage.getItem(USER_ID_KEY);
+      return this.readLocalItem(USER_ID_KEY, this.inMemoryUserId);
     }
     return this.inMemoryUserId;
   }
@@ -488,9 +548,9 @@ class PersistenceManager {
   setUserId(userId: string | null): void {
     if (this.shouldUseLocalStorage()) {
       if (userId) {
-        localStorage.setItem(USER_ID_KEY, userId);
+        this.writeLocalItem(USER_ID_KEY, userId);
       } else {
-        localStorage.removeItem(USER_ID_KEY);
+        this.removeLocalItem(USER_ID_KEY);
       }
     }
     this.inMemoryUserId = userId;
@@ -503,7 +563,7 @@ class PersistenceManager {
   getAnonymousId(): string | null {
     // Try cookies first (for cross-subdomain support)
     if (this.shouldUseCookies()) {
-      const cookieId = getCookie(ANONYMOUS_ID_KEY);
+      const cookieId = this.readCookie(ANONYMOUS_ID_KEY, this.inMemoryAnonymousId);
       if (cookieId) {
         return cookieId;
       }
@@ -511,7 +571,7 @@ class PersistenceManager {
 
     // Fall back to localStorage
     if (this.shouldUseLocalStorage()) {
-      return localStorage.getItem(ANONYMOUS_ID_KEY);
+      return this.readLocalItem(ANONYMOUS_ID_KEY, this.inMemoryAnonymousId);
     }
 
     return this.inMemoryAnonymousId;
@@ -524,12 +584,12 @@ class PersistenceManager {
   setAnonymousId(anonymousId: string): void {
     // Save to cookies if enabled
     if (this.shouldUseCookies()) {
-      setCookie(ANONYMOUS_ID_KEY, anonymousId, this.cookieDomain);
+      this.writeCookie(ANONYMOUS_ID_KEY, anonymousId, this.cookieDomain);
     }
 
     // Also save to localStorage as fallback
     if (this.shouldUseLocalStorage()) {
-      localStorage.setItem(ANONYMOUS_ID_KEY, anonymousId);
+      this.writeLocalItem(ANONYMOUS_ID_KEY, anonymousId);
     }
 
     this.inMemoryAnonymousId = anonymousId;
@@ -552,8 +612,8 @@ class PersistenceManager {
     const existingId = this.getAnonymousId();
     if (existingId) {
       // Ensure it's saved to cookies if we have cookie support now
-      if (this.shouldUseCookies() && !getCookie(ANONYMOUS_ID_KEY)) {
-        setCookie(ANONYMOUS_ID_KEY, existingId, this.cookieDomain);
+      if (this.shouldUseCookies() && !this.readCookie(ANONYMOUS_ID_KEY, this.inMemoryAnonymousId)) {
+        this.writeCookie(ANONYMOUS_ID_KEY, existingId, this.cookieDomain);
       }
       return existingId;
     }
@@ -579,7 +639,7 @@ class PersistenceManager {
    */
   getAppVersion(): string | null {
     if (this.shouldUseLocalStorage()) {
-      return localStorage.getItem(APP_VERSION_KEY);
+      return this.readLocalItem(APP_VERSION_KEY, this.inMemoryAppVersion);
     }
     return this.inMemoryAppVersion;
   }
@@ -590,9 +650,9 @@ class PersistenceManager {
   setAppVersion(version: string | null): void {
     if (this.shouldUseLocalStorage()) {
       if (version) {
-        localStorage.setItem(APP_VERSION_KEY, version);
+        this.writeLocalItem(APP_VERSION_KEY, version);
       } else {
-        localStorage.removeItem(APP_VERSION_KEY);
+        this.removeLocalItem(APP_VERSION_KEY);
       }
     }
     this.inMemoryAppVersion = version;
@@ -609,9 +669,9 @@ class PersistenceManager {
       return false; // Can't reliably detect without persistence
     }
 
-    const hasLaunched = localStorage.getItem(FIRST_LAUNCH_KEY);
+    const hasLaunched = this.readLocalItem(FIRST_LAUNCH_KEY);
     if (!hasLaunched) {
-      localStorage.setItem(FIRST_LAUNCH_KEY, 'true');
+      this.writeLocalItem(FIRST_LAUNCH_KEY, 'true');
       return true;
     }
     return false;
@@ -621,11 +681,17 @@ class PersistenceManager {
    * Get all super properties.
    */
   getSuperProperties(): EventProperties {
+    if (this.failedLocalWrites.has(SUPER_PROPERTIES_KEY)) {
+      return { ...this.inMemorySuperProperties };
+    }
     if (this.shouldUseLocalStorage()) {
       try {
-        const stored = localStorage.getItem(SUPER_PROPERTIES_KEY);
+        const stored = this.readLocalItem(SUPER_PROPERTIES_KEY);
         if (stored) {
-          return JSON.parse(stored) as EventProperties;
+          const parsed: unknown = JSON.parse(stored);
+          return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+            ? (parsed as EventProperties)
+            : {};
         }
       } catch (e) {
         logger.warn('Failed to load super properties from localStorage', e);
@@ -673,7 +739,7 @@ class PersistenceManager {
     this.inMemorySuperProperties = properties;
     if (this.shouldUseLocalStorage()) {
       try {
-        localStorage.setItem(SUPER_PROPERTIES_KEY, JSON.stringify(properties));
+        this.writeLocalItem(SUPER_PROPERTIES_KEY, JSON.stringify(properties));
       } catch (e) {
         logger.warn('Failed to save super properties to localStorage', e);
       }
@@ -685,7 +751,7 @@ class PersistenceManager {
    */
   getIdentifyHash(): string | null {
     if (this.shouldUseLocalStorage()) {
-      return localStorage.getItem(IDENTIFY_HASH_KEY);
+      return this.readLocalItem(IDENTIFY_HASH_KEY, this.inMemoryIdentifyHash);
     }
     return this.inMemoryIdentifyHash;
   }
@@ -695,7 +761,7 @@ class PersistenceManager {
    */
   setIdentifyHash(hash: string): void {
     if (this.shouldUseLocalStorage()) {
-      localStorage.setItem(IDENTIFY_HASH_KEY, hash);
+      this.writeLocalItem(IDENTIFY_HASH_KEY, hash);
     }
     this.inMemoryIdentifyHash = hash;
   }
@@ -705,7 +771,10 @@ class PersistenceManager {
    */
   getIdentifyLastSentAt(): number | null {
     if (this.shouldUseLocalStorage()) {
-      const timestamp = localStorage.getItem(IDENTIFY_TIMESTAMP_KEY);
+      const timestamp = this.readLocalItem(
+        IDENTIFY_TIMESTAMP_KEY,
+        this.inMemoryIdentifyLastSentAt === null ? null : String(this.inMemoryIdentifyLastSentAt)
+      );
       return timestamp ? parseInt(timestamp, 10) : null;
     }
     return this.inMemoryIdentifyLastSentAt;
@@ -716,7 +785,7 @@ class PersistenceManager {
    */
   setIdentifyLastSentAt(timestamp: number): void {
     if (this.shouldUseLocalStorage()) {
-      localStorage.setItem(IDENTIFY_TIMESTAMP_KEY, timestamp.toString());
+      this.writeLocalItem(IDENTIFY_TIMESTAMP_KEY, timestamp.toString());
     }
     this.inMemoryIdentifyLastSentAt = timestamp;
   }
@@ -726,8 +795,8 @@ class PersistenceManager {
    */
   clearIdentifyState(): void {
     if (this.shouldUseLocalStorage()) {
-      localStorage.removeItem(IDENTIFY_HASH_KEY);
-      localStorage.removeItem(IDENTIFY_TIMESTAMP_KEY);
+      this.removeLocalItem(IDENTIFY_HASH_KEY);
+      this.removeLocalItem(IDENTIFY_TIMESTAMP_KEY);
     }
     this.inMemoryIdentifyHash = null;
     this.inMemoryIdentifyLastSentAt = null;
@@ -741,7 +810,10 @@ class PersistenceManager {
   getOptOutStatus(): boolean | null {
     // Check cookies first (consistent with anonymous ID persistence)
     if (this.shouldUseCookies()) {
-      const cookieValue = getCookie(OPT_OUT_KEY);
+      const cookieValue = this.readCookie(
+        OPT_OUT_KEY,
+        this.inMemoryOptOut === null ? null : String(this.inMemoryOptOut)
+      );
       if (cookieValue === 'true') {
         return true;
       }
@@ -752,7 +824,10 @@ class PersistenceManager {
 
     if (this.shouldUseLocalStorage()) {
       try {
-        const stored = localStorage.getItem(OPT_OUT_KEY);
+        const stored = this.readLocalItem(
+          OPT_OUT_KEY,
+          this.inMemoryOptOut === null ? null : String(this.inMemoryOptOut)
+        );
         if (stored === 'true') {
           return true;
         }
@@ -783,12 +858,12 @@ class PersistenceManager {
     const value = optedOut ? 'true' : 'false';
 
     if (this.shouldUseCookies()) {
-      setCookie(OPT_OUT_KEY, value, this.cookieDomain);
+      this.writeCookie(OPT_OUT_KEY, value, this.cookieDomain);
     }
 
     if (this.shouldUseLocalStorage()) {
       try {
-        localStorage.setItem(OPT_OUT_KEY, value);
+        this.writeLocalItem(OPT_OUT_KEY, value);
       } catch (e) {
         logger.warn('Failed to persist opt-out status to localStorage', e);
       }
@@ -821,11 +896,11 @@ class PersistenceManager {
 
   clearSession(): void {
     if (this.shouldUseCookies()) {
-      setCookie(SESSION_KEY, '', this.cookieDomain, 0);
+      this.writeCookie(SESSION_KEY, '', this.cookieDomain, 0);
     }
     if (this.shouldUseLocalStorage()) {
       try {
-        localStorage.removeItem(SESSION_KEY);
+        this.removeLocalItem(SESSION_KEY);
       } catch {
         /* best effort */
       }
@@ -835,7 +910,10 @@ class PersistenceManager {
 
   private getSession(): PersistedSession | null {
     if (this.shouldUseCookies()) {
-      const raw = getCookie(SESSION_KEY);
+      const raw = this.readCookie(
+        SESSION_KEY,
+        this.inMemorySession === null ? null : JSON.stringify(this.inMemorySession)
+      );
       if (raw) {
         const session = this.parseSession(raw);
         if (session) {
@@ -846,7 +924,10 @@ class PersistenceManager {
 
     if (this.shouldUseLocalStorage()) {
       try {
-        const raw = localStorage.getItem(SESSION_KEY);
+        const raw = this.readLocalItem(
+          SESSION_KEY,
+          this.inMemorySession === null ? null : JSON.stringify(this.inMemorySession)
+        );
         return raw ? this.parseSession(raw) : null;
       } catch {
         return null;
@@ -872,11 +953,11 @@ class PersistenceManager {
   private setSession(session: PersistedSession, timeoutMs: number): void {
     const raw = JSON.stringify(session);
     if (this.shouldUseCookies()) {
-      setCookie(SESSION_KEY, raw, this.cookieDomain, Math.ceil(timeoutMs / 1000));
+      this.writeCookie(SESSION_KEY, raw, this.cookieDomain, Math.ceil(timeoutMs / 1000));
     }
     if (this.shouldUseLocalStorage()) {
       try {
-        localStorage.setItem(SESSION_KEY, raw);
+        this.writeLocalItem(SESSION_KEY, raw);
       } catch {
         /* best effort */
       }

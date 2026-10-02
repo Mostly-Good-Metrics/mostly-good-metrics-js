@@ -79,41 +79,42 @@ export class FetchNetworkClient implements INetworkClient {
       };
     }
 
-    const url = `${config.baseURL}${EVENTS_ENDPOINT}`;
-    const jsonBody = JSON.stringify(payload);
-    const keepalive =
-      (options?.keepalive ?? false) &&
-      new TextEncoder().encode(jsonBody).byteLength <= MAX_KEEPALIVE_BYTES;
-    // Start exit-time requests immediately. Compression is asynchronous and
-    // browsers may suspend a page before that work finishes.
-    const { data, compressed } = keepalive
-      ? { data: jsonBody, compressed: false }
-      : await compressIfNeeded(jsonBody);
-
-    const osVersion = config.osVersion || getOSVersion();
-    const sdkVersion = config.sdkVersion || SDK_VERSION;
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${config.apiKey}`,
-      'X-MGM-SDK': config.sdk,
-      'X-MGM-SDK-Version': sdkVersion,
-      'X-MGM-Platform': config.platform,
-      ...(osVersion && { 'X-MGM-Platform-Version': osVersion }),
-    };
-
-    if (config.bundleId) {
-      headers['X-MGM-Bundle-Id'] = config.bundleId;
-    }
-
-    if (compressed) {
-      headers['Content-Encoding'] = 'gzip';
-    }
-
-    logger.debug(`Sending ${payload.events.length} events to ${url}`);
-
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
     try {
+      const url = `${config.baseURL}${EVENTS_ENDPOINT}`;
+      const jsonBody = JSON.stringify(payload);
+      const keepalive =
+        (options?.keepalive ?? false) &&
+        new TextEncoder().encode(jsonBody).byteLength <= MAX_KEEPALIVE_BYTES;
+      // Start exit-time requests immediately. Compression is asynchronous and
+      // browsers may suspend a page before that work finishes.
+      const { data, compressed } = keepalive
+        ? { data: jsonBody, compressed: false }
+        : await compressIfNeeded(jsonBody);
+
+      const osVersion = config.osVersion || getOSVersion();
+      const sdkVersion = config.sdkVersion || SDK_VERSION;
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${config.apiKey}`,
+        'X-MGM-SDK': config.sdk,
+        'X-MGM-SDK-Version': sdkVersion,
+        'X-MGM-Platform': config.platform,
+        ...(osVersion && { 'X-MGM-Platform-Version': osVersion }),
+      };
+
+      if (config.bundleId) {
+        headers['X-MGM-Bundle-Id'] = config.bundleId;
+      }
+
+      if (compressed) {
+        headers['Content-Encoding'] = 'gzip';
+      }
+
+      logger.debug(`Sending ${payload.events.length} events to ${url}`);
+
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
       const response = await fetch(url, {
         method: 'POST',
@@ -122,8 +123,6 @@ export class FetchNetworkClient implements INetworkClient {
         signal: controller.signal,
         keepalive,
       });
-
-      clearTimeout(timeoutId);
 
       return this.handleResponse(response);
     } catch (e) {
@@ -145,6 +144,10 @@ export class FetchNetworkClient implements INetworkClient {
         ),
         shouldRetry: true,
       };
+    } finally {
+      if (timeoutId !== undefined) {
+        clearTimeout(timeoutId);
+      }
     }
   }
 
@@ -163,7 +166,10 @@ export class FetchNetworkClient implements INetworkClient {
     // Rate limited
     if (statusCode === 429) {
       const retryAfterHeader = response.headers.get('Retry-After');
-      const retryAfterSeconds = retryAfterHeader ? parseInt(retryAfterHeader, 10) : 60;
+      const parsedDelay =
+        retryAfterHeader && /^\d+$/.test(retryAfterHeader.trim()) ? Number(retryAfterHeader) : NaN;
+      const retryAfterSeconds =
+        Number.isFinite(parsedDelay) && parsedDelay >= 0 && parsedDelay <= 86400 ? parsedDelay : 60;
 
       this.retryAfterTime = new Date(Date.now() + retryAfterSeconds * 1000);
 

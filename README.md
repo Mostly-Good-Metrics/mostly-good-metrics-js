@@ -447,6 +447,14 @@ MostlyGoodMetrics.configure({
 });
 ```
 
+The provider runs synchronously on the JavaScript caller. Return ordinary JSON-like
+values; asynchronous providers are unsupported. MGM contains provider exceptions
+and observes rejected callback promises so they do not become unhandled rejections.
+Unreadable property getters are omitted, and property traversal is bounded to
+prevent oversized or recursive arrays from exhausting capture work. Properties
+are copied when captured, including super properties, so later mutation does not
+change queued events.
+
 Collision precedence is: super properties < dynamic context < event properties
 < MGM system properties. `$`-prefixed keys are MGM-reserved; with
 `enableDebugLogging: true`, MGM warns when custom event/context properties use
@@ -464,6 +472,13 @@ Events are automatically flushed periodically and when the page is hidden. You c
 ```typescript
 await MostlyGoodMetrics.flush();
 ```
+
+Automatic timer and page-exit flushes contain storage/network failures and keep
+unsent events queued for retry. Explicitly awaited `flush()`,
+`clearPendingEvents()`, and `getPendingEventCount()` retain their promise failure
+behavior for custom adapters; handle those promises in your application. SDK
+error handlers may return a promise; MGM observes its rejection, but does not
+wait for asynchronous error handling before continuing delivery.
 
 To check pending events:
 
