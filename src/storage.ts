@@ -20,6 +20,28 @@ const OPT_OUT_KEY = 'mostlygoodmetrics_opt_out';
 const SESSION_KEY = 'mostlygoodmetrics_session';
 const STORAGE_WRITE_TIMEOUT_MS = 1000;
 
+// Count limits alone can retain hundreds of MB of valid-size offline events.
+// This private safety ceiling applies only to the SDK's built-in event stores.
+const MAX_RETAINED_EVENT_BYTES = 1024 * 1024;
+function eventBytes(event: MGMEvent): number {
+  const json = JSON.stringify(event);
+  let bytes = 0;
+  for (let i = 0; i < json.length; i++) {
+    const code = json.charCodeAt(i);
+    if (code < 0x80) {
+      bytes++;
+    } else if (code < 0x800) {
+      bytes += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff && i + 1 < json.length) {
+      bytes += 4;
+      i++;
+    } else {
+      bytes += 3;
+    }
+  }
+  return bytes;
+}
+
 interface PersistedSession {
   id: string;
   lastActivityAt: number;
@@ -116,19 +138,25 @@ function setCookie(
 export class InMemoryEventStorage implements IEventStorage {
   private events: MGMEvent[] = [];
   private maxEvents: number;
+  private retainedBytes = 0;
+  private sizes: number[] = [];
 
   constructor(maxEvents: number = Constraints.MIN_STORED_EVENTS) {
     this.maxEvents = Math.max(maxEvents, Constraints.MIN_STORED_EVENTS);
   }
 
   async store(event: MGMEvent): Promise<void> {
+    const bytes = eventBytes(event);
+    if (bytes > MAX_RETAINED_EVENT_BYTES) {
+      logger.debug('Dropped event exceeding queue byte ceiling');
+      return;
+    }
     this.events.push(event);
-
-    // Trim oldest events if we exceed the limit
-    if (this.events.length > this.maxEvents) {
-      const excess = this.events.length - this.maxEvents;
-      this.events.splice(0, excess);
-      logger.debug(`Dropped ${excess} oldest events due to storage limit`);
+    this.sizes.push(bytes);
+    this.retainedBytes += bytes;
+    while (this.events.length > this.maxEvents || this.retainedBytes > MAX_RETAINED_EVENT_BYTES) {
+      this.events.shift();
+      this.retainedBytes -= this.sizes.shift() ?? 0;
     }
   }
 
@@ -153,6 +181,8 @@ export class InMemoryEventStorage implements IEventStorage {
     } else {
       this.events.splice(0, count);
     }
+    this.sizes = this.events.map(eventBytes);
+    this.retainedBytes = this.sizes.reduce((sum, size) => sum + size, 0);
   }
 
   async eventCount(): Promise<number> {
@@ -161,6 +191,8 @@ export class InMemoryEventStorage implements IEventStorage {
 
   async clear(): Promise<void> {
     this.events = [];
+    this.sizes = [];
+    this.retainedBytes = 0;
   }
 
   /**
@@ -177,6 +209,8 @@ export class InMemoryEventStorage implements IEventStorage {
  */
 export class LocalStorageEventStorage implements IEventStorage {
   private maxEvents: number;
+  private retainedBytes = 0;
+  private sizes: number[] = [];
   private events: MGMEvent[] | null = null;
   private pendingSave: Promise<void> | null = null;
   private resolvePendingSave: (() => void) | null = null;
@@ -196,7 +230,7 @@ export class LocalStorageEventStorage implements IEventStorage {
 
     try {
       const stored = localStorage.getItem(STORAGE_KEY);
-      if (stored) {
+      if (stored && stored.length <= MAX_RETAINED_EVENT_BYTES) {
         const parsed: unknown = JSON.parse(stored);
         this.events = Array.isArray(parsed)
           ? parsed.filter(
@@ -215,6 +249,12 @@ export class LocalStorageEventStorage implements IEventStorage {
       this.events = [];
     }
 
+    this.sizes = this.events.map(eventBytes);
+    this.retainedBytes = this.sizes.reduce((sum, size) => sum + size, 0);
+    while (this.events.length > this.maxEvents || this.retainedBytes > MAX_RETAINED_EVENT_BYTES) {
+      this.events.shift();
+      this.retainedBytes -= this.sizes.shift() ?? 0;
+    }
     return this.events;
   }
 
@@ -238,17 +278,22 @@ export class LocalStorageEventStorage implements IEventStorage {
       this.rejectPendingSave = reject;
     });
 
-    if (typeof window !== 'undefined' && typeof window.requestIdleCallback === 'function') {
-      this.idleCallbackId = window.requestIdleCallback(() => this.flushPendingWrites(), {
-        timeout: STORAGE_WRITE_TIMEOUT_MS,
-      });
-    } else if (typeof window !== 'undefined') {
-      this.timeoutId = window.setTimeout(() => this.flushPendingWrites(), 0);
-    } else {
+    const pendingSave = this.pendingSave;
+    try {
+      if (typeof window !== 'undefined' && typeof window.requestIdleCallback === 'function') {
+        this.idleCallbackId = window.requestIdleCallback(() => this.flushPendingWrites(), {
+          timeout: STORAGE_WRITE_TIMEOUT_MS,
+        });
+      } else {
+        this.timeoutId = setTimeout(() => this.flushPendingWrites(), 0) as unknown as number;
+      }
+    } catch {
+      // Browser scheduler wrappers can throw. Keep the queue usable and fall
+      // back to a plain deferred write rather than leaving pendingSave stuck.
       this.timeoutId = setTimeout(() => this.flushPendingWrites(), 0) as unknown as number;
     }
 
-    return this.pendingSave;
+    return pendingSave;
   }
 
   private cancelScheduledSave(): void {
@@ -257,10 +302,18 @@ export class LocalStorageEventStorage implements IEventStorage {
       typeof window !== 'undefined' &&
       typeof window.cancelIdleCallback === 'function'
     ) {
-      window.cancelIdleCallback(this.idleCallbackId);
+      try {
+        window.cancelIdleCallback(this.idleCallbackId);
+      } catch {
+        /* A late callback sees a clean queue. */
+      }
     }
     if (this.timeoutId !== null) {
-      clearTimeout(this.timeoutId);
+      try {
+        clearTimeout(this.timeoutId);
+      } catch {
+        /* A late callback sees a clean queue. */
+      }
     }
     this.idleCallbackId = null;
     this.timeoutId = null;
@@ -288,16 +341,19 @@ export class LocalStorageEventStorage implements IEventStorage {
   }
 
   async store(event: MGMEvent): Promise<void> {
+    const bytes = eventBytes(event);
+    if (bytes > MAX_RETAINED_EVENT_BYTES) {
+      logger.debug('Dropped event exceeding queue byte ceiling');
+      return;
+    }
     const events = this.loadEvents();
     events.push(event);
-
-    // Trim oldest events if we exceed the limit
-    if (events.length > this.maxEvents) {
-      const excess = events.length - this.maxEvents;
-      events.splice(0, excess);
-      logger.debug(`Dropped ${excess} oldest events due to storage limit`);
+    this.sizes.push(bytes);
+    this.retainedBytes += bytes;
+    while (events.length > this.maxEvents || this.retainedBytes > MAX_RETAINED_EVENT_BYTES) {
+      events.shift();
+      this.retainedBytes -= this.sizes.shift() ?? 0;
     }
-
     await this.scheduleSave();
   }
 
@@ -324,6 +380,8 @@ export class LocalStorageEventStorage implements IEventStorage {
     } else {
       events.splice(0, count);
     }
+    this.sizes = (this.events ?? []).map(eventBytes);
+    this.retainedBytes = this.sizes.reduce((sum, size) => sum + size, 0);
     await this.scheduleSave();
   }
 
@@ -333,6 +391,8 @@ export class LocalStorageEventStorage implements IEventStorage {
 
   async clear(): Promise<void> {
     this.events = [];
+    this.sizes = [];
+    this.retainedBytes = 0;
     this.cancelScheduledSave();
     this.dirty = false;
     this.pendingSave = null;
@@ -687,7 +747,7 @@ class PersistenceManager {
     if (this.shouldUseLocalStorage()) {
       try {
         const stored = this.readLocalItem(SUPER_PROPERTIES_KEY);
-        if (stored) {
+        if (stored && stored.length <= Constraints.MAX_PROPERTY_SIZE_BYTES) {
           const parsed: unknown = JSON.parse(stored);
           return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
             ? (parsed as EventProperties)
@@ -938,6 +998,9 @@ class PersistenceManager {
   }
 
   private parseSession(raw: string): PersistedSession | null {
+    if (raw.length > 1024) {
+      return null;
+    }
     try {
       const value = JSON.parse(raw) as Partial<PersistedSession>;
       return typeof value.id === 'string' &&

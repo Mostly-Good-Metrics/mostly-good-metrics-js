@@ -1,5 +1,5 @@
 import { logger, setDebugLogging } from './logger';
-import { createDefaultNetworkClient } from './network';
+import { cancelPendingNetworkRequests, createDefaultNetworkClient } from './network';
 import {
   createDefaultExperimentStorage,
   createDefaultStorage,
@@ -56,6 +56,7 @@ const LOCAL_EXPERIMENT_CONFIGS_KEY = 'mgm_local_experiment_configs';
 const LOCAL_ASSIGNMENTS_KEY = 'mgm_local_experiment_assignments';
 const EXPERIMENTS_REFETCH_INTERVAL_MS = 60 * 60 * 1000; // Background revalidation at most hourly
 const EXPERIMENTS_FETCH_TIMEOUT_MS = 60 * 1000; // Abort hung experiments fetches so they always settle
+const MAX_EXPERIMENT_CACHE_BYTES = 1024 * 1024;
 const READY_DEFAULT_TIMEOUT_MS = 5000; // Default ready() timeout, unified across all MGM SDKs
 
 /**
@@ -81,6 +82,15 @@ export class MostlyGoodMetrics {
   private originalReplaceState: typeof history.replaceState | null = null;
   private optedOut: boolean;
   private evaluatingContext = false;
+  private destroyed = false;
+  private experimentRequestGeneration = 0;
+  private experimentRequests = new Set<{
+    controller: AbortController;
+    timer: ReturnType<typeof setTimeout>;
+  }>();
+  private browserCleanups: Array<() => void> = [];
+  private installedPushState: typeof history.pushState | null = null;
+  private installedReplaceState: typeof history.replaceState | null = null;
 
   // A/B testing state
   private assignedVariants: Record<string, string> = {}; // Server-assigned variants
@@ -88,8 +98,8 @@ export class MostlyGoodMetrics {
   private localAssignments: Record<string, string> = {}; // Local mode: experiment UUID -> sticky variant
   private experimentStorage: IExperimentStorage;
   private experimentsLoaded = false;
-  private experimentsReadyResolve: (() => void) | null = null;
-  private experimentsReadyPromise: Promise<void>;
+  private experimentsReadyPending = true;
+  private readyWaiters = new Set<() => void>();
   private trackedExposures = new Set<string>(); // (user, experiment, variant) exposure dedup
 
   /**
@@ -133,7 +143,7 @@ export class MostlyGoodMetrics {
     this.storage =
       this.config.storage ??
       createDefaultStorage(this.config.maxStoredEvents, this.config.persistence);
-    this.setupStoragePersistenceListeners();
+    this.runHostOperation(() => this.setupStoragePersistenceListeners());
 
     // Initialize network client
     this.networkClient = this.config.networkClient ?? createDefaultNetworkClient();
@@ -143,22 +153,19 @@ export class MostlyGoodMetrics {
       this.config.experimentStorage ?? createDefaultExperimentStorage(this.config.persistence);
 
     // Initialize experiments ready promise
-    this.experimentsReadyPromise = new Promise((resolve) => {
-      this.experimentsReadyResolve = resolve;
-    });
 
     logger.info(`MostlyGoodMetrics initialized with environment: ${this.config.environment}`);
 
     // Start auto-flush timer
-    this.startFlushTimer();
+    this.runHostOperation(() => this.startFlushTimer());
 
     // Set up lifecycle tracking
     if (this.config.trackAppLifecycleEvents) {
-      this.setupLifecycleTracking();
+      this.runHostOperation(() => this.setupLifecycleTracking());
     }
 
     if (this.config.trackPageViews) {
-      this.setupWebAnalytics();
+      this.runHostOperation(() => this.setupWebAnalytics());
     }
 
     // Hydrate the experiments cache and revalidate in the background
@@ -403,6 +410,9 @@ export class MostlyGoodMetrics {
    * Track an event with the given name and optional properties.
    */
   track(name: string, properties?: EventProperties): void {
+    if (this.destroyed) {
+      return;
+    }
     try {
       if (this.optedOut) {
         logger.debug(`Tracking is opted out, ignoring event: ${name}`);
@@ -427,6 +437,9 @@ export class MostlyGoodMetrics {
       this.sessionIdValue = this.resolveSessionId();
       const sanitizedProperties = sanitizeProperties(properties);
       const contextProperties = this.getDynamicContext();
+      if (this.destroyed || this.optedOut) {
+        return;
+      }
       const superProperties = sanitizeProperties(persistence.getSuperProperties());
 
       // Merge properties: super properties < dynamic context < event properties <
@@ -800,7 +813,7 @@ export class MostlyGoodMetrics {
   }
 
   private async flushInternal(keepalive: boolean): Promise<void> {
-    if (this.optedOut) {
+    if (this.destroyed || this.optedOut) {
       logger.debug('Tracking is opted out, skipping flush');
       return;
     }
@@ -894,6 +907,9 @@ export class MostlyGoodMetrics {
    * (user, experiment, variant).
    */
   getVariant(experimentName: string, fallback: string | null = null): string | null {
+    if (this.destroyed) {
+      return fallback;
+    }
     if (!experimentName) {
       logger.warn('getVariant called with empty experimentName');
       return fallback;
@@ -940,12 +956,28 @@ export class MostlyGoodMetrics {
    * so variants become available to subsequent calls.
    */
   ready(timeoutMs: number = READY_DEFAULT_TIMEOUT_MS): Promise<void> {
+    if (!this.experimentsReadyPending || this.destroyed) {
+      return Promise.resolve();
+    }
     return new Promise((resolve) => {
-      const timer = setTimeout(resolve, timeoutMs);
-      void this.experimentsReadyPromise.then(() => {
-        clearTimeout(timer);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const finish = (): void => {
+        this.readyWaiters.delete(finish);
+        if (timer !== undefined) {
+          this.runHostOperation(() => clearTimeout(timer));
+        }
         resolve();
-      });
+      };
+      this.readyWaiters.add(finish);
+      try {
+        const milliseconds = Number.isFinite(timeoutMs)
+          ? Math.min(Math.max(0, timeoutMs), 2_147_483_647)
+          : READY_DEFAULT_TIMEOUT_MS;
+        timer = setTimeout(finish, milliseconds);
+      } catch (error) {
+        logger.error('Could not schedule ready timeout; using available fallbacks', error);
+        finish();
+      }
     });
   }
 
@@ -953,12 +985,35 @@ export class MostlyGoodMetrics {
    * Clean up resources (stop timers, etc.).
    */
   destroy(): void {
-    this.stopFlushTimer();
-    this.removeLifecycleListeners();
-    this.removeWebAnalytics();
-    flushPendingStorageWrites(this.storage);
-    this.removeStoragePersistenceListeners();
+    if (this.destroyed) {
+      return;
+    }
+    this.destroyed = true;
+    this.markExperimentsReady();
+    this.cancelExperimentRequests();
+    this.runHostOperation(() => cancelPendingNetworkRequests(this.networkClient));
+    const cleanups: Array<() => void> = [
+      (): void => this.stopFlushTimer(),
+      (): void => this.removeLifecycleListeners(),
+      (): void => this.removeWebAnalytics(),
+      (): void => flushPendingStorageWrites(this.storage),
+      (): void => this.removeStoragePersistenceListeners(),
+    ];
+    for (const cleanup of cleanups) {
+      this.runHostOperation(cleanup);
+    }
+    for (const cleanup of this.browserCleanups.splice(0)) {
+      this.runHostOperation(cleanup);
+    }
     logger.debug('MostlyGoodMetrics instance destroyed');
+  }
+
+  private runHostOperation(operation: () => void): void {
+    try {
+      operation();
+    } catch (error) {
+      logger.error('Browser integration operation failed', error);
+    }
   }
 
   // =====================================================
@@ -985,32 +1040,60 @@ export class MostlyGoodMetrics {
     }
   }
 
+  private addBrowserListener(
+    target: Window | Document,
+    type: string,
+    listener: EventListener
+  ): void {
+    this.runHostOperation(() => {
+      // Retain the matching remover at registration time. Later host wrappers
+      // may throw; they must not leave SDK instances retained by old listeners.
+      const remove = target.removeEventListener.bind(target);
+      this.browserCleanups.push(() => remove(type, listener));
+      target.addEventListener(type, listener);
+    });
+  }
+
   private setupStoragePersistenceListeners(): void {
     if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
-      window.addEventListener('pagehide', this.handleStoragePageHide);
+      this.addBrowserListener(window, 'pagehide', this.handleStoragePageHide);
     }
     if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
-      document.addEventListener('visibilitychange', this.handleStorageVisibilityChange);
+      this.addBrowserListener(document, 'visibilitychange', this.handleStorageVisibilityChange);
     }
   }
 
   private removeStoragePersistenceListeners(): void {
     if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
-      window.removeEventListener('pagehide', this.handleStoragePageHide);
+      this.runHostOperation(() =>
+        window.removeEventListener('pagehide', this.handleStoragePageHide)
+      );
     }
     if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
-      document.removeEventListener('visibilitychange', this.handleStorageVisibilityChange);
+      this.runHostOperation(() =>
+        document.removeEventListener('visibilitychange', this.handleStorageVisibilityChange)
+      );
     }
   }
 
   private handleStoragePageHide = (): void => {
-    flushPendingStorageWrites(this.storage);
+    if (this.destroyed) {
+      return;
+    }
+    this.runHostOperation(() => {
+      flushPendingStorageWrites(this.storage);
+    });
   };
 
   private handleStorageVisibilityChange = (): void => {
-    if (document.hidden) {
-      flushPendingStorageWrites(this.storage);
+    if (this.destroyed) {
+      return;
     }
+    this.runHostOperation(() => {
+      if (document.hidden) {
+        flushPendingStorageWrites(this.storage);
+      }
+    });
   };
 
   private resolveSessionId(): string {
@@ -1046,28 +1129,47 @@ export class MostlyGoodMetrics {
     }
     this.webAnalyticsSetup = true;
     this.pageVisibleAt = document.hidden ? null : Date.now();
-    this.capturePageView();
+    this.runHostOperation(() => this.capturePageView());
 
-    window.addEventListener('popstate', this.handlePageNavigation);
-    document.addEventListener('visibilitychange', this.handleWebVisibilityChange);
-    window.addEventListener('pagehide', this.handleWebPageHide);
+    this.addBrowserListener(window, 'popstate', this.handlePageNavigation);
+    this.addBrowserListener(document, 'visibilitychange', this.handleWebVisibilityChange);
+    this.addBrowserListener(window, 'pagehide', this.handleWebPageHide);
 
-    this.originalPushState = history.pushState.bind(history);
-    this.originalReplaceState = history.replaceState.bind(history);
-    history.pushState = ((...args: Parameters<typeof history.pushState>) => {
-      this.originalPushState?.(...args);
-      this.handlePageNavigation();
-    }) as typeof history.pushState;
-    history.replaceState = ((...args: Parameters<typeof history.replaceState>) => {
-      this.originalReplaceState?.(...args);
-      this.handlePageNavigation();
-    }) as typeof history.replaceState;
+    this.runHostOperation(() => {
+      // eslint-disable-next-line @typescript-eslint/unbound-method -- Preserve host identity; invoked with history via apply.
+      this.originalPushState = history.pushState;
+      this.installedPushState = ((...args: Parameters<typeof history.pushState>) => {
+        const result = this.originalPushState?.apply(history, args);
+        if (!this.destroyed) {
+          this.runHostOperation(() => this.handlePageNavigation());
+        }
+        return result;
+      }) as typeof history.pushState;
+      history.pushState = this.installedPushState;
+    });
+    this.runHostOperation(() => {
+      // eslint-disable-next-line @typescript-eslint/unbound-method -- Preserve host identity; invoked with history via apply.
+      this.originalReplaceState = history.replaceState;
+      this.installedReplaceState = ((...args: Parameters<typeof history.replaceState>) => {
+        const result = this.originalReplaceState?.apply(history, args);
+        if (!this.destroyed) {
+          this.runHostOperation(() => this.handlePageNavigation());
+        }
+        return result;
+      }) as typeof history.replaceState;
+      history.replaceState = this.installedReplaceState;
+    });
 
     const heartbeatMs = Math.min(this.config.sessionTimeoutMinutes * 30_000, 60_000);
     this.sessionHeartbeatTimer = setInterval(() => {
-      if (!document.hidden) {
-        this.sessionIdValue = this.resolveSessionId();
+      if (this.destroyed) {
+        return;
       }
+      this.runHostOperation(() => {
+        if (!document.hidden) {
+          this.sessionIdValue = this.resolveSessionId();
+        }
+      });
     }, heartbeatMs);
   }
 
@@ -1079,16 +1181,22 @@ export class MostlyGoodMetrics {
     ) {
       return;
     }
-    this.capturePageEngagement();
-    window.removeEventListener('popstate', this.handlePageNavigation);
-    document.removeEventListener('visibilitychange', this.handleWebVisibilityChange);
-    window.removeEventListener('pagehide', this.handleWebPageHide);
-    if (this.originalPushState) {
-      history.pushState = this.originalPushState;
-    }
-    if (this.originalReplaceState) {
-      history.replaceState = this.originalReplaceState;
-    }
+    this.runHostOperation(() => this.capturePageEngagement());
+    this.runHostOperation(() => window.removeEventListener('popstate', this.handlePageNavigation));
+    this.runHostOperation(() =>
+      document.removeEventListener('visibilitychange', this.handleWebVisibilityChange)
+    );
+    this.runHostOperation(() => window.removeEventListener('pagehide', this.handleWebPageHide));
+    this.runHostOperation(() => {
+      if (this.originalPushState && history.pushState === this.installedPushState) {
+        history.pushState = this.originalPushState;
+      }
+    });
+    this.runHostOperation(() => {
+      if (this.originalReplaceState && history.replaceState === this.installedReplaceState) {
+        history.replaceState = this.originalReplaceState;
+      }
+    });
     if (this.sessionHeartbeatTimer) {
       clearInterval(this.sessionHeartbeatTimer);
     }
@@ -1097,29 +1205,46 @@ export class MostlyGoodMetrics {
   }
 
   private handlePageNavigation = (): void => {
-    this.capturePageEngagement();
-    this.pageVisibleAt = document.hidden ? null : Date.now();
-    this.capturePageView();
+    if (this.destroyed) {
+      return;
+    }
+    this.runHostOperation(() => {
+      this.capturePageEngagement();
+      this.pageVisibleAt = document.hidden ? null : Date.now();
+      this.capturePageView();
+    });
   };
 
   private handleWebVisibilityChange = (): void => {
-    if (document.hidden) {
-      this.capturePageEngagement();
-      flushPendingStorageWrites(this.storage);
-      // Persisted queues make the event durable, and an immediate flush gives
-      // browsers a chance to deliver it before the tab is discarded.
-      void this.flushInternal(true).catch((error) => logger.error('Teardown flush failed', error));
-    } else {
-      this.pageVisibleAt = Date.now();
+    if (this.destroyed) {
+      return;
     }
+    this.runHostOperation(() => {
+      if (document.hidden) {
+        this.capturePageEngagement();
+        flushPendingStorageWrites(this.storage);
+        // Persisted queues make the event durable, and an immediate flush gives
+        // browsers a chance to deliver it before the tab is discarded.
+        void this.flushInternal(true).catch((error) =>
+          logger.error('Teardown flush failed', error)
+        );
+      } else {
+        this.pageVisibleAt = Date.now();
+      }
+    });
   };
 
   private handleWebPageHide = (): void => {
-    this.capturePageEngagement();
-    flushPendingStorageWrites(this.storage);
-    // Best effort at teardown; the persisted queue remains available for the
-    // next visit if the browser suspends this asynchronous flush first.
-    void this.flushInternal(true).catch((error) => logger.error('Teardown flush failed', error));
+    if (this.destroyed) {
+      return;
+    }
+    this.runHostOperation(() => {
+      this.capturePageEngagement();
+      flushPendingStorageWrites(this.storage);
+      // Best effort at teardown; the persisted queue remains available for the
+      // next visit if the browser suspends this asynchronous flush first.
+      void this.flushInternal(true).catch((error) => logger.error('Teardown flush failed', error));
+    });
   };
 
   private capturePageView(): void {
@@ -1175,7 +1300,7 @@ export class MostlyGoodMetrics {
 
   private async performFlush(keepalive = false): Promise<void> {
     let hasMoreEvents = true;
-    while (hasMoreEvents) {
+    while (hasMoreEvents && !this.destroyed && !this.optedOut) {
       const eventCount = await this.storage.eventCount();
       if (eventCount === 0) {
         logger.debug('No events to flush');
@@ -1193,9 +1318,15 @@ export class MostlyGoodMetrics {
         break;
       }
 
+      if (this.destroyed || this.optedOut) {
+        break;
+      }
       const payload = this.buildPayload(events);
       const result = await this.networkClient.sendEvents(payload, this.config, { keepalive });
 
+      if (this.destroyed || this.optedOut) {
+        break;
+      }
       if (result.success) {
         logger.debug(`Successfully sent ${events.length} events`);
         await this.storage.removeEvents(
@@ -1290,22 +1421,26 @@ export class MostlyGoodMetrics {
     this.trackAppOpened();
 
     // Track visibility changes (background/foreground)
-    document.addEventListener('visibilitychange', this.handleVisibilityChange);
+    this.addBrowserListener(document, 'visibilitychange', this.handleVisibilityChange);
 
     // Flush on page unload
-    window.addEventListener('beforeunload', this.handleBeforeUnload);
-    window.addEventListener('pagehide', this.handlePageHide);
+    this.addBrowserListener(window, 'beforeunload', this.handleBeforeUnload);
+    this.addBrowserListener(window, 'pagehide', this.handlePageHide);
 
     logger.debug('Lifecycle tracking enabled');
   }
 
   private removeLifecycleListeners(): void {
     if (typeof document !== 'undefined') {
-      document.removeEventListener('visibilitychange', this.handleVisibilityChange);
+      this.runHostOperation(() =>
+        document.removeEventListener('visibilitychange', this.handleVisibilityChange)
+      );
     }
     if (typeof window !== 'undefined') {
-      window.removeEventListener('beforeunload', this.handleBeforeUnload);
-      window.removeEventListener('pagehide', this.handlePageHide);
+      this.runHostOperation(() =>
+        window.removeEventListener('beforeunload', this.handleBeforeUnload)
+      );
+      this.runHostOperation(() => window.removeEventListener('pagehide', this.handlePageHide));
     }
   }
 
@@ -1347,25 +1482,40 @@ export class MostlyGoodMetrics {
   }
 
   private handleVisibilityChange = (): void => {
-    if (document.hidden) {
-      // App backgrounded
-      this.track(SystemEvents.APP_BACKGROUNDED);
-      flushPendingStorageWrites(this.storage);
-      void this.flush().catch((error) => logger.error('Automatic flush failed', error)); // Flush when going to background
-    } else {
-      // App foregrounded
-      this.track(SystemEvents.APP_OPENED);
+    if (this.destroyed) {
+      return;
     }
+    this.runHostOperation(() => {
+      if (document.hidden) {
+        // App backgrounded
+        this.track(SystemEvents.APP_BACKGROUNDED);
+        flushPendingStorageWrites(this.storage);
+        void this.flush().catch((error) => logger.error('Automatic flush failed', error)); // Flush when going to background
+      } else {
+        // App foregrounded
+        this.track(SystemEvents.APP_OPENED);
+      }
+    });
   };
 
   private handleBeforeUnload = (): void => {
-    flushPendingStorageWrites(this.storage);
-    void this.flushInternal(true).catch((error) => logger.error('Teardown flush failed', error));
+    if (this.destroyed) {
+      return;
+    }
+    this.runHostOperation(() => {
+      flushPendingStorageWrites(this.storage);
+      void this.flushInternal(true).catch((error) => logger.error('Teardown flush failed', error));
+    });
   };
 
   private handlePageHide = (): void => {
-    flushPendingStorageWrites(this.storage);
-    void this.flushInternal(true).catch((error) => logger.error('Teardown flush failed', error));
+    if (this.destroyed) {
+      return;
+    }
+    this.runHostOperation(() => {
+      flushPendingStorageWrites(this.storage);
+      void this.flushInternal(true).catch((error) => logger.error('Teardown flush failed', error));
+    });
   };
 
   // =====================================================
@@ -1395,7 +1545,14 @@ export class MostlyGoodMetrics {
     await this.hydrateExposures();
 
     const cached = await this.loadExperimentsCache();
-    if (cached && cached.userId === currentUserId) {
+    if (this.destroyed) {
+      return;
+    }
+    if (
+      cached &&
+      cached.userId === currentUserId &&
+      currentUserId === (this.userId ?? this.anonymousIdValue)
+    ) {
       const cacheAge = Date.now() - cached.fetchedAt;
       logger.debug(
         `Using cached experiment variants (age: ${Math.round(cacheAge / 1000 / 60)}min)`
@@ -1429,9 +1586,59 @@ export class MostlyGoodMetrics {
    * guaranteed to settle. A response that arrives after a ready() timeout is
    * still applied atomically - late variants are better than none.
    */
+  private async readExperimentResponse(response: Response): Promise<unknown> {
+    const contentLength = response.headers?.get('Content-Length');
+    if (contentLength && Number(contentLength) > MAX_EXPERIMENT_CACHE_BYTES) {
+      throw new Error('Experiment response exceeds byte ceiling');
+    }
+    if (
+      response.body &&
+      typeof response.body.getReader === 'function' &&
+      typeof TextDecoder !== 'undefined'
+    ) {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      const chunks: string[] = [];
+      let bytes = 0;
+      try {
+        for (let chunk = await reader.read(); !chunk.done; chunk = await reader.read()) {
+          bytes += chunk.value.byteLength;
+          if (bytes > MAX_EXPERIMENT_CACHE_BYTES) {
+            await reader.cancel();
+            throw new Error('Experiment response exceeds byte ceiling');
+          }
+          chunks.push(decoder.decode(chunk.value, { stream: true }));
+        }
+        chunks.push(decoder.decode());
+        return JSON.parse(chunks.join('')) as unknown;
+      } finally {
+        reader.releaseLock();
+      }
+    }
+    // Older fetch shims may lack body streams; bound text before JSON parsing.
+    if (typeof response.text === 'function') {
+      const text = await response.text();
+      if (text.length > MAX_EXPERIMENT_CACHE_BYTES) {
+        throw new Error('Experiment response exceeds byte ceiling');
+      }
+      return JSON.parse(text) as unknown;
+    }
+    // Preserve compatibility with injected test/native fetch adapters that only
+    // expose json(); these adapters own their transport allocation limits.
+    return response.json() as Promise<unknown>;
+  }
+
+  private cancelExperimentRequests(): void {
+    for (const request of this.experimentRequests) {
+      this.runHostOperation(() => clearTimeout(request.timer));
+      this.runHostOperation(() => request.controller.abort());
+    }
+    this.experimentRequests.clear();
+  }
+
   private async fetchExperiments(): Promise<void> {
     // No network requests while opted out. optIn() triggers a fetch.
-    if (this.optedOut) {
+    if (this.destroyed || this.optedOut) {
       logger.debug('Tracking is opted out, skipping experiments fetch');
       this.markExperimentsReady();
       return;
@@ -1449,8 +1656,17 @@ export class MostlyGoodMetrics {
 
     // Abort the request if it hangs so this promise is guaranteed to settle
     // (and markExperimentsReady() is guaranteed to run).
+    // Only the latest refresh owns a request and timeout. Aborted or late
+    // responses must not replace assignments for a newer identity.
+    const generation = ++this.experimentRequestGeneration;
+    this.cancelExperimentRequests();
     const abortController = new AbortController();
-    const abortTimer = setTimeout(() => abortController.abort(), EXPERIMENTS_FETCH_TIMEOUT_MS);
+    const abortTimer = setTimeout(
+      () => this.runHostOperation(() => abortController.abort()),
+      EXPERIMENTS_FETCH_TIMEOUT_MS
+    );
+    const request = { controller: abortController, timer: abortTimer };
+    this.experimentRequests.add(request);
 
     try {
       logger.debug('Fetching experiments...');
@@ -1464,25 +1680,40 @@ export class MostlyGoodMetrics {
         signal: abortController.signal,
       });
 
+      if (this.destroyed || this.optedOut || generation !== this.experimentRequestGeneration) {
+        return;
+      }
       if (!response.ok) {
         logger.warn(`Failed to fetch experiments: ${response.status}`);
         return;
       }
 
-      const data = (await response.json()) as ExperimentsResponse;
+      const data = (await this.readExperimentResponse(response)) as ExperimentsResponse;
+      if (this.destroyed || this.optedOut || generation !== this.experimentRequestGeneration) {
+        return;
+      }
 
       // Atomically swap in the server-assigned variants
-      this.assignedVariants = data.assigned_variants ?? {};
+      const variants: unknown = data.assigned_variants ?? {};
+      if (!this.isVariantMap(variants)) {
+        logger.warn('Ignoring malformed experiment assignments');
+        return;
+      }
+      this.assignedVariants = variants;
 
       // Persist to the experiment storage adapter (with last-fetch timestamp)
       await this.saveExperimentsCache(currentUserId, this.assignedVariants);
 
       logger.debug(`Loaded ${Object.keys(this.assignedVariants).length} assigned variants`);
     } catch (e) {
+      this.runHostOperation(() => abortController.abort());
       logger.warn('Failed to fetch experiments', e);
     } finally {
-      clearTimeout(abortTimer);
-      this.markExperimentsReady();
+      this.runHostOperation(() => clearTimeout(abortTimer));
+      this.experimentRequests.delete(request);
+      if (generation === this.experimentRequestGeneration) {
+        this.markExperimentsReady();
+      }
     }
   }
 
@@ -1509,6 +1740,9 @@ export class MostlyGoodMetrics {
     // Hydrate exposure flags and sticky assignments so both survive restarts
     await this.hydrateExposures();
     await this.hydrateLocalAssignments();
+    if (this.destroyed) {
+      return;
+    }
 
     // Inline configs: no network at all
     if (this.config.localExperiments) {
@@ -1552,7 +1786,7 @@ export class MostlyGoodMetrics {
   private async fetchLocalExperimentConfigs(): Promise<void> {
     // No network requests while opted out. getVariant() can still bucket
     // from inline or cached configs; optIn() triggers a fetch.
-    if (this.optedOut) {
+    if (this.destroyed || this.optedOut) {
       logger.debug('Tracking is opted out, skipping local experiment configs fetch');
       this.markExperimentsReady();
       return;
@@ -1560,8 +1794,17 @@ export class MostlyGoodMetrics {
 
     const url = `${this.config.baseURL}/v1/experiments/configs`;
 
+    // Only the latest refresh owns a request and timeout. Aborted or late
+    // responses must not replace assignments for a newer identity.
+    const generation = ++this.experimentRequestGeneration;
+    this.cancelExperimentRequests();
     const abortController = new AbortController();
-    const abortTimer = setTimeout(() => abortController.abort(), EXPERIMENTS_FETCH_TIMEOUT_MS);
+    const abortTimer = setTimeout(
+      () => this.runHostOperation(() => abortController.abort()),
+      EXPERIMENTS_FETCH_TIMEOUT_MS
+    );
+    const request = { controller: abortController, timer: abortTimer };
+    this.experimentRequests.add(request);
 
     try {
       logger.debug('Fetching local experiment configs...');
@@ -1575,12 +1818,18 @@ export class MostlyGoodMetrics {
         signal: abortController.signal,
       });
 
+      if (this.destroyed || this.optedOut || generation !== this.experimentRequestGeneration) {
+        return;
+      }
       if (!response.ok) {
         logger.warn(`Failed to fetch local experiment configs: ${response.status}`);
         return;
       }
 
-      const data = (await response.json()) as ExperimentConfigsResponse;
+      const data = (await this.readExperimentResponse(response)) as ExperimentConfigsResponse;
+      if (this.destroyed || this.optedOut || generation !== this.experimentRequestGeneration) {
+        return;
+      }
       const experiments = data.experiments ?? [];
 
       this.setLocalExperimentConfigs(experiments);
@@ -1588,10 +1837,14 @@ export class MostlyGoodMetrics {
 
       logger.debug(`Loaded ${experiments.length} local experiment configs`);
     } catch (e) {
+      this.runHostOperation(() => abortController.abort());
       logger.warn('Failed to fetch local experiment configs', e);
     } finally {
-      clearTimeout(abortTimer);
-      this.markExperimentsReady();
+      this.runHostOperation(() => clearTimeout(abortTimer));
+      this.experimentRequests.delete(request);
+      if (generation === this.experimentRequestGeneration) {
+        this.markExperimentsReady();
+      }
     }
   }
 
@@ -1667,7 +1920,7 @@ export class MostlyGoodMetrics {
   private async hydrateLocalAssignments(): Promise<void> {
     try {
       const raw = await this.experimentStorage.getItem(LOCAL_ASSIGNMENTS_KEY);
-      if (raw) {
+      if (raw && raw.length <= MAX_EXPERIMENT_CACHE_BYTES) {
         const parsed = JSON.parse(raw) as unknown;
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
           const assignments: Record<string, string> = {};
@@ -1704,10 +1957,17 @@ export class MostlyGoodMetrics {
   private async loadLocalConfigsCache(): Promise<CachedExperimentConfigs | null> {
     try {
       const cached = await this.experimentStorage.getItem(LOCAL_EXPERIMENT_CONFIGS_KEY);
-      if (!cached) {
+      if (!cached || cached.length > MAX_EXPERIMENT_CACHE_BYTES) {
         return null;
       }
-      return JSON.parse(cached) as CachedExperimentConfigs;
+      const parsed: unknown = JSON.parse(cached);
+      if (parsed === null || typeof parsed !== 'object') {
+        return null;
+      }
+      const value = parsed as Partial<CachedExperimentConfigs>;
+      return Number.isFinite(value.fetchedAt) && Array.isArray(value.experiments)
+        ? (value as CachedExperimentConfigs)
+        : null;
     } catch (e) {
       logger.debug('Failed to load local experiment configs cache', e);
       return null;
@@ -1730,28 +1990,22 @@ export class MostlyGoodMetrics {
   }
 
   /**
-   * Mark experiments as loaded and resolve the ready promise.
+   * Mark experiments as loaded and release active readiness waiters.
    */
   private markExperimentsReady(): void {
     this.experimentsLoaded = true;
-    if (this.experimentsReadyResolve) {
-      this.experimentsReadyResolve();
-      this.experimentsReadyResolve = null;
+    for (const finish of this.readyWaiters) {
+      finish();
     }
+    this.experimentsReadyPending = false;
   }
 
   /**
-   * Arm a new ready() promise for an in-flight refetch (e.g. after identify).
-   * No-op if the current promise is still pending - it will be resolved by
-   * whichever fetch settles first.
+   * Mark readiness pending for the latest identity refresh. Existing waiters
+   * finish when that refresh settles or their own timeout expires.
    */
   private resetExperimentsReadyPromise(): void {
-    if (this.experimentsReadyResolve !== null) {
-      return;
-    }
-    this.experimentsReadyPromise = new Promise((resolve) => {
-      this.experimentsReadyResolve = resolve;
-    });
+    this.experimentsReadyPending = true;
   }
 
   /**
@@ -1789,7 +2043,7 @@ export class MostlyGoodMetrics {
   private async hydrateExposures(): Promise<void> {
     try {
       const raw = await this.experimentStorage.getItem(EXPERIMENT_EXPOSURES_KEY);
-      if (raw) {
+      if (raw && raw.length <= MAX_EXPERIMENT_CACHE_BYTES) {
         const parsed = JSON.parse(raw) as unknown;
         if (Array.isArray(parsed)) {
           this.trackedExposures = new Set(parsed.filter((k): k is string => typeof k === 'string'));
@@ -1832,13 +2086,31 @@ export class MostlyGoodMetrics {
   /**
    * Load experiment variants from the experiment storage adapter.
    */
+  private isVariantMap(value: unknown): value is Record<string, string> {
+    return (
+      value !== null &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      Object.values(value).every((variant) => typeof variant === 'string')
+    );
+  }
+
   private async loadExperimentsCache(): Promise<CachedExperimentVariants | null> {
     try {
       const cached = await this.experimentStorage.getItem(EXPERIMENTS_CACHE_KEY);
-      if (!cached) {
+      if (!cached || cached.length > MAX_EXPERIMENT_CACHE_BYTES) {
         return null;
       }
-      return JSON.parse(cached) as CachedExperimentVariants;
+      const parsed: unknown = JSON.parse(cached);
+      if (parsed === null || typeof parsed !== 'object') {
+        return null;
+      }
+      const value = parsed as Partial<CachedExperimentVariants>;
+      return typeof value.userId === 'string' &&
+        Number.isFinite(value.fetchedAt) &&
+        this.isVariantMap(value.variants)
+        ? (value as CachedExperimentVariants)
+        : null;
     } catch (e) {
       logger.debug('Failed to load experiments cache', e);
       return null;

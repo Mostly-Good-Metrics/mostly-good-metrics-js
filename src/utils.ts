@@ -16,9 +16,13 @@ import {
  * Generate a UUID v4 string.
  */
 export function generateUUID(): string {
-  // Use crypto.randomUUID if available (modern browsers and Node.js 19+)
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
+  // Native/hybrid crypto shims may exist before their module is initialized.
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+  } catch {
+    /* Use the existing non-cryptographic analytics-ID fallback. */
   }
 
   // Fallback implementation
@@ -36,17 +40,22 @@ export function generateUUID(): string {
 function generateRandomString(length: number): string {
   const chars = '0123456789abcdefghijklmnopqrstuvwxyz';
   let result = '';
-  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
-    const array = new Uint8Array(length);
-    crypto.getRandomValues(array);
-    for (let i = 0; i < length; i++) {
-      result += chars[array[i] % chars.length];
+  try {
+    if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+      const array = new Uint8Array(length);
+      crypto.getRandomValues(array);
+      for (let i = 0; i < length; i++) {
+        result += chars[array[i] % chars.length];
+      }
+      return result;
     }
-  } else {
-    for (let i = 0; i < length; i++) {
-      result += chars[Math.floor(Math.random() * chars.length)];
-    }
+  } catch {
+    /* Use the existing non-cryptographic analytics-ID fallback. */
   }
+  for (let i = 0; i < length; i++) {
+    result += chars[Math.floor(Math.random() * chars.length)];
+  }
+
   return result;
 }
 
@@ -152,9 +161,14 @@ function sanitizeValue(
       logger.debug(
         `Truncating string property from ${value.length} to ${Constraints.MAX_STRING_PROPERTY_LENGTH} characters`
       );
-      return value.substring(0, Constraints.MAX_STRING_PROPERTY_LENGTH);
+      // A V8 substring can retain the entire original (megabytes) as its
+      // backing string. Round-trip only the bounded slice to own a small copy.
+      return JSON.parse(
+        JSON.stringify(value.substring(0, Constraints.MAX_STRING_PROPERTY_LENGTH))
+      ) as string;
     }
-    return value;
+    // Valid-size input can itself be a slice of a huge caller string.
+    return value.length > 12 ? (JSON.parse(JSON.stringify(value)) as string) : value;
   }
 
   // Arrays
@@ -184,6 +198,9 @@ function sanitizeValue(
 
     const result: Record<string, EventPropertyValue> = {};
     for (const key of Object.keys(value)) {
+      if (key.length > Constraints.MAX_PROPERTY_SIZE_BYTES) {
+        continue;
+      }
       if (budget.remaining <= 0) {
         break;
       }

@@ -480,6 +480,17 @@ behavior for custom adapters; handle those promises in your application. SDK
 error handlers may return a promise; MGM observes its rejection, but does not
 wait for asynchronous error handling before continuing delivery.
 
+Built-in event stores also cap queued event JSON at approximately 1 MiB. The SDK
+evicts the oldest events when either this byte ceiling or `maxStoredEvents` is
+reached. An individual event larger than the ceiling is dropped. Oversized
+persisted queues are ignored before parsing so recovery cannot exhaust the host
+heap. Truncated property strings are copied so they cannot retain a much larger
+source string. Stored super properties, experiment caches and supported streamed
+experiment responses are also checked before parsing. Older fetch adapters without
+readable body streams own the allocation needed to produce their text/JSON
+responses. Custom event storage adapters own their own memory and persistence
+limits.
+
 To check pending events:
 
 ```typescript
@@ -622,6 +633,13 @@ The SDK handles many tasks automatically to provide a seamless analytics experie
 - **Handles rate limiting**: Automatically backs off when server rate limits are hit
 - **Adds deduplication IDs**: Includes unique `client_event_id` with each event to prevent duplicate processing
 - **Offline support**: Events queue locally when offline and send when connectivity returns
+
+`reset()` and `destroy()` stop SDK timers and abort SDK-owned requests. Page-view
+capture remains best effort when browser metadata or hooks are unavailable;
+SDK capture failures do not interrupt native navigation. MGM restores only its
+own history wrappers and preserves router hooks installed afterward. Repeated
+identity refreshes cancel the previous experiment request, and late responses
+cannot replace assignments for a newer identity.
 
 ### Lifecycle Tracking
 When `trackAppLifecycleEvents` is enabled, the SDK automatically:

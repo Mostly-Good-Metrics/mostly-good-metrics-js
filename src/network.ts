@@ -18,6 +18,33 @@ const MAX_KEEPALIVE_BYTES = 60_000;
 // "Update SDK version constant in code" step rewrites this line on release.
 const SDK_VERSION = '0.13.0';
 
+interface PendingRequest {
+  controller: AbortController;
+  timer: ReturnType<typeof setTimeout>;
+}
+const pendingRequests = new WeakMap<INetworkClient, Set<PendingRequest>>();
+
+// Internal lifecycle hook, deliberately not exported from the package entrypoint.
+export function cancelPendingNetworkRequests(client: INetworkClient): void {
+  const requests = pendingRequests.get(client);
+  if (!requests) {
+    return;
+  }
+  for (const request of requests) {
+    try {
+      clearTimeout(request.timer);
+    } catch (error) {
+      logger.error('Failed to clear event timeout', error);
+    }
+    try {
+      request.controller.abort();
+    } catch (error) {
+      logger.error('Failed to abort event request', error);
+    }
+  }
+  pendingRequests.delete(client);
+}
+
 /**
  * Compress data using gzip if available (browser CompressionStream API).
  * Falls back to uncompressed data if compression is not available.
@@ -80,6 +107,8 @@ export class FetchNetworkClient implements INetworkClient {
     }
 
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    let request: PendingRequest | undefined;
+    let requests = pendingRequests.get(this);
     try {
       const url = `${config.baseURL}${EVENTS_ENDPOINT}`;
       const jsonBody = JSON.stringify(payload);
@@ -114,7 +143,19 @@ export class FetchNetworkClient implements INetworkClient {
       logger.debug(`Sending ${payload.events.length} events to ${url}`);
 
       const controller = new AbortController();
-      timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      timeoutId = setTimeout(() => {
+        try {
+          controller.abort();
+        } catch (error) {
+          logger.error('Failed to abort event request', error);
+        }
+      }, REQUEST_TIMEOUT_MS);
+      if (!requests) {
+        requests = new Set();
+        pendingRequests.set(this, requests);
+      }
+      request = { controller, timer: timeoutId };
+      requests.add(request);
 
       const response = await fetch(url, {
         method: 'POST',
@@ -146,7 +187,14 @@ export class FetchNetworkClient implements INetworkClient {
       };
     } finally {
       if (timeoutId !== undefined) {
-        clearTimeout(timeoutId);
+        try {
+          clearTimeout(timeoutId);
+        } catch (error) {
+          logger.error('Failed to clear event timeout', error);
+        }
+      }
+      if (request) {
+        requests?.delete(request);
       }
     }
   }
